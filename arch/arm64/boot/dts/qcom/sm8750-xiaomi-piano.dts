@@ -134,6 +134,43 @@
 		regulator-always-on;
 		regulator-boot-on;
 	};
+
+	/*
+	 * AMOLED panel module power (ELVDD/ELVSS ~5.8 V, enabled by TLMM GPIOs
+	 * driving the panel's dedicated supply ICs). Downstream: dtbo entry 0,
+	 * display_gpio_regulator_vsp/vsn (tlmm 117/118, boot-on). (R)
+	 *
+	 * always-on is an experimental first-light measure: the upstream NT37801
+	 * driver manages vddio/vci/vdd only, so nothing else would hold these
+	 * rails up. OQ#16: teach the panel chain to gate them properly.
+	 */
+	display_panel_vsp: regulator-vsp {
+		compatible = "regulator-fixed";
+
+		regulator-name = "display_panel_vsp";
+		regulator-min-microvolt = <5800000>;		/* (R) */
+		regulator-max-microvolt = <5800000>;		/* (R) */
+
+		gpios = <&tlmm 117 GPIO_ACTIVE_HIGH>;	/* (R) */
+		enable-active-high;
+
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	display_panel_vsn: regulator-vsn {
+		compatible = "regulator-fixed";
+
+		regulator-name = "display_panel_vsn";
+		regulator-min-microvolt = <5800000>;		/* (R) */
+		regulator-max-microvolt = <5800000>;		/* (R) */
+
+		gpios = <&tlmm 118 GPIO_ACTIVE_HIGH>;	/* (R) */
+		enable-active-high;
+
+		regulator-boot-on;
+		regulator-always-on;
+	};
 };
 
 /*
@@ -733,6 +770,53 @@
 	};
 };
 
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l3g_1p2>;			/* (M) */
+
+	status = "okay";
+
+	panel@0 {
+		compatible = "novatek,nt37801";
+		reg = <0>;
+
+		/*
+		 * Xiaomi Pad 8 Pro panel: NT37801 AMOLED, WQHD+ 1440x3200,
+		 * 4 DSI lanes, DSC 2x(720x40) slices, DCS backlight.
+		 * Downstream reset GPIO 0x62 = 98. (R)
+		 */
+		reset-gpios = <&tlmm 98 GPIO_ACTIVE_LOW>;
+
+		vddio-supply = <&vreg_l12b_1p8>;		/* (R): downstream "vddil12b" */
+		vci-supply = <&vreg_l13b_3p0>;		/* (M), OQ#16 */
+		vdd-supply = <&vreg_l11b_1p0>;		/* (M), OQ#16 */
+
+		pinctrl-0 = <&disp0_reset_n_active>;
+		pinctrl-1 = <&disp0_reset_n_suspend>;
+		pinctrl-names = "default", "sleep";
+
+		port {
+			panel0_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&panel0_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l3i_0p88>;			/* (M) */
+
+	status = "okay";
+};
+
 &pmih0108_eusb2_repeater {
 	qcom,tune-usb2-preem = /bits/ 8 <0x3>;		/* (M), OQ#12 */
 	qcom,tune-usb2-amplitude = /bits/ 8 <0xa>;	/* (M), OQ#12 */
@@ -747,6 +831,24 @@
 &qup_i2c3_data_clk {
 	/* Use internal I2C pull-up */
 	bias-pull-up = <2200>;
+};
+
+&tlmm {
+	gpio-reserved-ranges = <36 4>, <74 1>;		/* (M), OQ#13 */
+
+	disp0_reset_n_active: disp0-reset-n-active-state {
+		pins = "gpio98";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	disp0_reset_n_suspend: disp0-reset-n-suspend-state {
+		pins = "gpio98";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
 };
 
 &qupv3_1 {
