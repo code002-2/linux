@@ -1,0 +1,43 @@
+name: piano-dtb
+
+on:
+  pull_request:
+  push:
+    branches: ['piano-*']
+
+permissions:
+  contents: read
+
+jobs:
+  piano-dtb:
+    name: piano-dtb
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              clang lld llvm bc flex bison libssl-dev libelf-dev cpio \
+              dwarves device-tree-compiler
+
+      - name: Build piano_defconfig, Image and dtbs
+        run: |
+          make ARCH=arm64 LLVM=1 O=out piano_defconfig
+          make ARCH=arm64 LLVM=1 O=out -j"$(nproc)" Image dtbs
+
+      - name: Verify piano artifacts
+        run: |
+          test -s out/arch/arm64/boot/Image
+          test -s out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: piano-build
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb
+          retention-days: 7
+          if-no-files-found: error
