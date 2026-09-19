@@ -54,6 +54,13 @@ properties:
   pinctrl-1: true
   pinctrl-names: true
 
+  panel:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: |
+      Phandle to the DRM panel this touch controller follows. When present,
+      the driver registers as a DRM panel follower and defers probe until
+      the panel is prepared.
+
 required:
   - compatible
   - reg
@@ -71,7 +78,6 @@ examples:
 
         touchscreen@0 {
             compatible = "novatek,NVT-ts-spi";
-            reg = <0>;
             spi-max-frequency = <19200000>;
             novatek,irq-gpios = <&tlmm 162 GPIO_ACTIVE_HIGH>;
             firmware-name = "novatek/novatek_nt36532_piano_fw_csot.bin";

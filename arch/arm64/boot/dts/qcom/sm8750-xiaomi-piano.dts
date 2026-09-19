@@ -779,7 +779,7 @@
 
 	status = "okay";
 
-	panel@0 {
+	display_panel: panel@0 {
 		compatible = "novatek,nt37801";
 		reg = <0>;
 
@@ -894,13 +894,14 @@
 		firmware-name = "novatek/novatek_nt36532_piano_fw_csot.bin";
 
 		/*
-		 * No "panel" phandle on this branch: display nodes live on
-		 * the display experiment branch, so the driver's DRM panel
-		 * follower keeps this node probe-deferred here. No
-		 * touch-avdd regulator either: the imported driver does not
-		 * consume an avdd-supply; downstream toggles GPIO114
-		 * (touch_avdd_vreg) outside the touch node. (R), OQ#18
+		 * Integrated bring-up: the DSI panel is on this branch, so the
+		 * touch driver's DRM panel follower binds and probe proceeds
+		 * once the panel is prepared. No touch-avdd regulator: the
+		 * imported driver does not consume an avdd-supply; downstream
+		 * toggles GPIO114 (touch_avdd_vreg) outside the touch node.
+		 * (R), OQ#18
 		 */
+		panel = <&display_panel>;
 	};
 };
 
