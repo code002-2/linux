@@ -19,13 +19,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+              ccache \
               clang lld llvm bc flex bison libssl-dev libelf-dev cpio \
               dwarves device-tree-compiler
 
+      # Rolling compiler cache: every run saves a fresh entry (run_id key),
+      # restore falls back to the most recent one. First run is cold.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: ccache-${{ runner.arch }}-
+
       - name: Build piano_defconfig, Image and dtbs
+        env:
+          # Runner image clang updates must invalidate, not mis-hit
+          CCACHE_COMPILERCHECK: content
         run: |
-          make ARCH=arm64 LLVM=1 O=out piano_defconfig
-          make ARCH=arm64 LLVM=1 O=out -j"$(nproc)" Image dtbs
+          ccache --zero-stats
+          make ARCH=arm64 LLVM=1 CC="ccache clang" O=out piano_defconfig
+          make ARCH=arm64 LLVM=1 CC="ccache clang" O=out -j"$(nproc)" Image dtbs
+          ccache --show-stats
 
       - name: Verify piano artifacts
         run: |
