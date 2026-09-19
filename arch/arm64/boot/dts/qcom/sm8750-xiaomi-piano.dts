@@ -753,8 +753,89 @@
 	status = "okay";
 };
 
+&spi2 {
+	status = "okay";
+
+	/*
+	 * NT36532E SPI touch, SE2 of QUPv3 wrap 1. GPIO/frequency
+	 * evidence: stock dtbo fragment@53/@55 (local/dtb-downstream/
+	 * dtbo-entry0.dts). Downstream also sets "qcom,rt" (GENI
+	 * real-time hint) — no upstream binding or driver consumption,
+	 * so it is not carried over. (R)
+	 */
+	pinctrl-0 = <&qup_spi2_data_clk>, <&qup_spi2_cs>;
+	pinctrl-1 = <&piano_ts_spi_clk_suspend>,
+		    <&piano_ts_spi_mosi_suspend>,
+		    <&piano_ts_spi_miso_suspend>;
+	pinctrl-names = "default", "sleep";
+
+	touchscreen@0 {
+		compatible = "novatek,NVT-ts-spi";			/* (R) */
+		reg = <0>;
+		status = "okay";
+
+		spi-max-frequency = <19200000>;				/* (R): 0x124f800 */
+
+		novatek,irq-gpios = <&tlmm 162 GPIO_ACTIVE_HIGH>;	/* (R) */
+		novatek,lcd-id-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;	/* (R), OQ#18 */
+
+		pinctrl-0 = <&qup_spi2_cs>;
+		pinctrl-1 = <&piano_ts_cs_suspend>;
+		pinctrl-names = "pmx_ts_active", "pmx_ts_suspend";	/* (R) */
+
+		/*
+		 * CSOT-family firmware default (dual-panel OQ#15); the BOE
+		 * variant must be chosen from the real panel ID before any
+		 * device flash use. The blob itself never enters git — it
+		 * is consumed by the firmware deb from local/.
+		 */
+		firmware-name = "novatek/novatek_nt36532_piano_fw_csot.bin";
+
+		/*
+		 * No "panel" phandle on this branch: display nodes live on
+		 * the display experiment branch, so the driver's DRM panel
+		 * follower keeps this node probe-deferred here. No
+		 * touch-avdd regulator either: the imported driver does not
+		 * consume an avdd-supply; downstream toggles GPIO114
+		 * (touch_avdd_vreg) outside the touch node. (R), OQ#18
+		 */
+	};
+};
+
 &tlmm {
 	gpio-reserved-ranges = <36 4>, <74 1>;		/* (M), OQ#13 */
+
+	/* NT36532E touch: SE2 SPI sleep states, stock dtbo fragment@53. (R) */
+	piano_ts_spi_clk_suspend: piano-ts-spi-clk-suspend-state {
+		pins = "gpio42";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	piano_ts_spi_mosi_suspend: piano-ts-spi-mosi-suspend-state {
+		pins = "gpio41";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
+
+	piano_ts_spi_miso_suspend: piano-ts-spi-miso-suspend-state {
+		pins = "gpio40";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
+
+	piano_ts_cs_suspend: piano-ts-cs-suspend-state {
+		pins = "gpio43";
+		function = "gpio";
+		drive-strength = <6>;
+		bias-pull-down;
+		output-low;
+	};
 };
 
 &uart7 {
