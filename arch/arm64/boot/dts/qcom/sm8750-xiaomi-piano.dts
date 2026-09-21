@@ -124,6 +124,144 @@
 		};
 	};
 
+	/*
+	 * WCD9395 headset codec. Reset pin and supplies match stock vbdtb
+	 * (tlmm 101 wcd939x_reset_active; L15B/BOB1/L2I rails, dtbo
+	 * fragment@110). Headset audio exits via the USB-C mux above.
+	 * (R)
+	 */
+	wcd939x: audio-codec {
+		compatible = "qcom,wcd9395-codec", "qcom,wcd9390-codec";
+
+		pinctrl-0 = <&wcd_default>;
+		pinctrl-names = "default";
+
+		qcom,micbias1-microvolt = <1800000>;
+		qcom,micbias2-microvolt = <1800000>;
+		qcom,micbias3-microvolt = <1800000>;
+		qcom,micbias4-microvolt = <1800000>;
+		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
+		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
+		qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
+		qcom,rx-device = <&wcd_rx>;
+		qcom,tx-device = <&wcd_tx>;
+
+		reset-gpios = <&tlmm 101 GPIO_ACTIVE_LOW>;		/* (R) */
+
+		vdd-buck-supply = <&vreg_l15b_1p8>;			/* (R) */
+		vdd-rxtx-supply = <&vreg_l15b_1p8>;			/* (R) */
+		vdd-io-supply = <&vreg_l15b_1p8>;			/* (R) */
+		vdd-mic-bias-supply = <&vreg_bob1>;			/* (R) */
+		vdd-px-supply = <&vreg_l2i_1p2>;			/* (R) */
+
+		#sound-dai-cells = <1>;
+
+		mode-switch;
+		orientation-switch;
+
+		port {
+			wcd_codec_headset_in: endpoint {
+				remote-endpoint = <&wcd_usbss_headset_out>;
+			};
+		};
+	};
+
+	/*
+	 * Audioreach sound card, MTP link set with the quad-speaker
+	 * pattern from x1e80100-yoga-slim7x (both WSA buses on one
+	 * wsa-dai-link). Speaker amps: stock dtbo instantiates WSA884x
+	 * candidates on swr0/swr3 (wsa884x@02170220/21, with WSA883x
+	 * fallback variants); WSA884x chosen as primary guess, OQ#21.
+	 */
+	sound {
+		compatible = "qcom,sm8750-sndcard", "qcom,sm8450-sndcard";
+		model = "Xiaomi Pad 8 Pro";
+
+		audio-routing = "SpkrFL IN", "WSA WSA_SPK1 OUT",
+				"SpkrFR IN", "WSA WSA_SPK2 OUT",
+				"SpkrRL IN", "WSA2 WSA_SPK1 OUT",
+				"SpkrRR IN", "WSA2 WSA_SPK2 OUT",
+				"IN1_HPHL", "HPHL_OUT",
+				"IN2_HPHR", "HPHR_OUT",
+				"AMIC2", "MIC BIAS2",
+				"VA DMIC0", "MIC BIAS3",
+				"VA DMIC1", "MIC BIAS3",
+				"VA DMIC2", "MIC BIAS1",
+				"VA DMIC3", "MIC BIAS1",
+				"VA DMIC0", "VA MIC BIAS3",
+				"VA DMIC1", "VA MIC BIAS3",
+				"VA DMIC2", "VA MIC BIAS1",
+				"VA DMIC3", "VA MIC BIAS1",
+				"TX SWR_INPUT1", "ADC2_OUTPUT";
+
+		wcd-playback-dai-link {
+			link-name = "WCD Playback";
+
+			codec {
+				sound-dai = <&wcd939x 0>, <&swr1 0>, <&lpass_rxmacro 0>;
+			};
+
+			cpu {
+				sound-dai = <&q6apmbedai RX_CODEC_DMA_RX_0>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+
+		wcd-capture-dai-link {
+			link-name = "WCD Capture";
+
+			codec {
+				sound-dai = <&wcd939x 1>, <&swr2 0>, <&lpass_txmacro 0>;
+			};
+
+			cpu {
+				sound-dai = <&q6apmbedai TX_CODEC_DMA_TX_3>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+
+		wsa-dai-link {
+			link-name = "WSA Playback";
+
+			codec {
+				sound-dai = <&spkr_fl>, <&spkr_fr>,
+					    <&swr0 0>, <&lpass_wsamacro 0>,
+					    <&spkr_rl>, <&spkr_rr>,
+					    <&swr3 0>, <&lpass_wsa2macro 0>;
+			};
+
+			cpu {
+				sound-dai = <&q6apmbedai WSA_CODEC_DMA_RX_0>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+
+		va-dai-link {
+			link-name = "VA Capture";
+
+			codec {
+				sound-dai = <&lpass_vamacro 0>;
+			};
+
+			cpu {
+				sound-dai = <&q6apmbedai VA_CODEC_DMA_TX_0>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+	};
+
 	vph_pwr: vph-pwr-regulator {
 		compatible = "regulator-fixed";
 
@@ -836,7 +974,118 @@
 					remote-endpoint = <&pmic_glink_sbu>;
 				};
 			};
+			port@1 {
+				reg = <1>;
+
+				wcd_usbss_headset_out: endpoint {
+					remote-endpoint = <&wcd_codec_headset_in>;
+				};
+			};
 		};
+	};
+};
+
+/*
+ * ADSP (audio + sensors + battery services via pmic-glink) and CDSP.
+ * Firmware from the stock NON-HLOS image, staged by the test-image
+ * builder as qcom/sm8750/ .mbn headers plus bXX segments. MPSS stays
+ * off: piano is a Wi-Fi-only SKU. (R)
+ */
+&remoteproc_adsp {
+	firmware-name = "qcom/sm8750/adsp.mbn",
+			"qcom/sm8750/adsp_dtb.mbn";
+
+	status = "okay";
+};
+
+&remoteproc_cdsp {
+	firmware-name = "qcom/sm8750/cdsp.mbn",
+			"qcom/sm8750/cdsp_dtb.mbn";
+
+	status = "okay";
+};
+
+&lpass_vamacro {
+	vdd-micb-supply = <&vreg_l1b_1p8>;		/* (M) */
+	qcom,dmic-sample-rate = <4800000>;		/* (M) */
+};
+
+/*
+ * WSA884x amps, primary candidate per stock dtbo (OQ#21: exact amp
+ * family/address confirmed on first SDW enumeration). Enable pins are
+ * shared across buses: tlmm 76 drives amps 0/2, tlmm 77 amps 1/3.
+ */
+&swr0 {
+	status = "okay";
+
+	spkr_fl: speaker@0,1 {
+		compatible = "sdw20217020400";
+		reg = <0 1>;
+		reset-gpios = <&tlmm 76 GPIO_ACTIVE_LOW>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "SpkrFL";
+		vdd-1p8-supply = <&vreg_l15b_1p8>;
+		vdd-io-supply = <&vreg_l2i_1p2>;
+		qcom,port-mapping = <1 2 3 7 10 13>;
+	};
+
+	spkr_fr: speaker@0,2 {
+		compatible = "sdw20217020400";
+		reg = <0 2>;
+		reset-gpios = <&tlmm 77 GPIO_ACTIVE_LOW>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "SpkrFR";
+		vdd-1p8-supply = <&vreg_l15b_1p8>;
+		vdd-io-supply = <&vreg_l2i_1p2>;
+		qcom,port-mapping = <4 5 6 7 11 13>;
+	};
+};
+
+&swr1 {
+	status = "okay";
+
+	/* WCD9395 RX */
+	wcd_rx: codec@0,4 {
+		compatible = "sdw20217010e00";
+		reg = <0 4>;
+		qcom,rx-port-mapping = <1 2 3 4 5 9>;
+	};
+};
+
+&swr2 {
+	status = "okay";
+
+	/* WCD9395 TX */
+	wcd_tx: codec@0,3 {
+		compatible = "sdw20217010e00";
+		reg = <0 3>;
+		qcom,tx-port-mapping = <2 2 3 4>;
+	};
+};
+
+&swr3 {
+	status = "okay";
+
+	spkr_rl: speaker@0,1 {
+		compatible = "sdw20217020400";
+		reg = <0 1>;
+		reset-gpios = <&tlmm 76 GPIO_ACTIVE_LOW>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "SpkrRL";
+		vdd-1p8-supply = <&vreg_l15b_1p8>;
+		vdd-io-supply = <&vreg_l2i_1p2>;
+		qcom,port-mapping = <1 2 3 7 10 13>;
+	};
+
+	spkr_rr: speaker@0,2 {
+		compatible = "sdw20217020400";
+		reg = <0 2>;
+		reset-gpios = <&tlmm 77 GPIO_ACTIVE_LOW>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "SpkrRR";
+		vdd-1p8-supply = <&vreg_l15b_1p8>;
+		vdd-io-supply = <&vreg_l2i_1p2>;
+		qcom,port-mapping = <4 5 6 7 11 13>;
 	};
 };
 
@@ -905,6 +1154,36 @@
 
 &tlmm {
 	gpio-reserved-ranges = <36 4>, <74 1>;		/* (M), OQ#13 */
+
+	/*
+	 * WCD9395 codec reset (tlmm 101) and WSA speaker-amper enables
+	 * (tlmm 76 = amps 0/2, tlmm 77 = amps 1/3), stock vbdtb
+	 * wcd939x_reset_active / spkr_02|13_sd_n_active. (R)
+	 */
+	wcd_default: wcd-reset-n-active-state {
+		pins = "gpio101";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+		output-low;
+	};
+
+	spkr_0_sd_n_active: spkr-0-sd-n-active-state {
+		pins = "gpio76";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+		output-low;
+	};
+
+	spkr_1_sd_n_active: spkr-1-sd-n-active-state {
+		pins = "gpio77";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+		output-low;
+	};
+
 
 	disp0_reset_n_active: disp0-reset-n-active-state {
 		pins = "gpio98";
