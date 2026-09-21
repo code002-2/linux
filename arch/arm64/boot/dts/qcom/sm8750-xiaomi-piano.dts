@@ -171,6 +171,76 @@
 		regulator-boot-on;
 		regulator-always-on;
 	};
+
+	/*
+	 * WLAN/BT combo power sequencing: Qualcomm "peach" — the WCN7850
+	 * family compute SKU used on piano (downstream: qcom,cnss-peach with
+	 * PCI function 17cb:110e, dtbo fragment@80; stock firmware dirs
+	 * wlan/qca_cld/{peach,peach_v2} and non-hlos/image/peach/bdwlan.*).
+	 * Rail assignment and GPIO numbers match the in-tree SM8750 MTP
+	 * reference platform and the stock dtbo. (M)/(R), OQ#20
+	 */
+	wcn7850-pmu {
+		compatible = "qcom,wcn7850-pmu";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&wlan_en>, <&bt_default>;
+
+		wlan-enable-gpios = <&tlmm 16 GPIO_ACTIVE_HIGH>;
+		bt-enable-gpios = <&pm8550ve_f_gpios 3 GPIO_ACTIVE_HIGH>;
+
+		vdd-supply = <&vreg_s5f_0p85>;
+		vddio-supply = <&vreg_l3f_1p8>;
+		vddio1p2-supply = <&vreg_l2f_1p2>;
+		vddaon-supply = <&vreg_s4d_0p85>;
+		vdddig-supply = <&vreg_s5f_0p85>;
+		vddrfa1p2-supply = <&vreg_s7i_1p2>;
+		vddrfa1p8-supply = <&vreg_s3g_1p8>;
+
+		clocks = <&rpmhcc RPMH_RF_CLK1>;
+
+		regulators {
+			vreg_pmu_rfa_cmn: ldo0 {
+				regulator-name = "vreg_pmu_rfa_cmn";
+			};
+
+			vreg_pmu_aon_0p59: ldo1 {
+				regulator-name = "vreg_pmu_aon_0p59";
+			};
+
+			vreg_pmu_wlcx_0p8: ldo2 {
+				regulator-name = "vreg_pmu_wlcx_0p8";
+			};
+
+			vreg_pmu_wlmx_0p85: ldo3 {
+				regulator-name = "vreg_pmu_wlmx_0p85";
+			};
+
+			vreg_pmu_btcmx_0p85: ldo4 {
+				regulator-name = "vreg_pmu_btcmx_0p85";
+			};
+
+			vreg_pmu_rfa_0p8: ldo5 {
+				regulator-name = "vreg_pmu_rfa_0p8";
+			};
+
+			vreg_pmu_rfa_1p2: ldo6 {
+				regulator-name = "vreg_pmu_rfa_1p2";
+			};
+
+			vreg_pmu_rfa_1p8: ldo7 {
+				regulator-name = "vreg_pmu_rfa_1p8";
+			};
+
+			vreg_pmu_pcie_0p9: ldo8 {
+				regulator-name = "vreg_pmu_pcie_0p9";
+			};
+
+			vreg_pmu_pcie_1p8: ldo9 {
+				regulator-name = "vreg_pmu_pcie_1p8";
+			};
+		};
+	};
 };
 
 /*
@@ -871,6 +941,7 @@
 		    <&piano_ts_spi_miso_suspend>;
 	pinctrl-names = "default", "sleep";
 
+
 	touchscreen@0 {
 		compatible = "novatek,NVT-ts-spi";			/* (R) */
 		reg = <0>;
@@ -939,10 +1010,93 @@
 		bias-pull-down;
 		output-low;
 	};
+
+	/* WCN peach combo: WLAN enable (tlmm 16) and BT sw-ctrl monitor
+	 * (tlmm 18), stock dtbo fragments 78/84. (R) */
+	wlan_en: wlan-en-state {
+		pins = "gpio16";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-down;
+	};
+
+	bt_default: bt-default-state {
+		sw-ctrl-pins {
+			pins = "gpio18";
+			function = "gpio";
+			bias-pull-down;
+		};
+	};
 };
 
 &uart7 {
 	status = "okay";
+};
+
+/*
+ * BT HCI UART: SE14 4-wire (CTS gpio24 / RTS gpio25 / TX gpio26 / RX
+ * gpio27), stock vbdtb qupv3_se14_4uart. The hci_qca serdev driver
+ * power-sequences the controller through the wcn7850-pmu above and
+ * downloads firmware from qca/hmtbtfw*.tlv + qca/hmtnv*. (R)
+ */
+&uart14 {
+	status = "okay";
+
+	pinctrl-0 = <&qup_uart14_default>, <&qup_uart14_cts_rts>;
+
+	bluetooth {
+		compatible = "qcom,wcn7850-bt";
+
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
+		vddaon-supply = <&vreg_pmu_aon_0p59>;
+		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
+		vddwlmx-supply = <&vreg_pmu_wlmx_0p85>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p8-supply = <&vreg_pmu_rfa_1p8>;
+
+		max-speed = <3200000>;
+	};
+};
+
+/*
+ * WLAN: peach on PCIe0 (downstream supported-ids 0x110e; perst gpio102,
+ * clkreq gpio103, wake gpio104 — stock vbdtb pcie0 pinctrl). ath12k
+ * binds through the experimental peach PCI ID on the bring-up branch.
+ * (R), OQ#20
+ */
+&pcie0 {
+	pinctrl-0 = <&pcie0_default_state>;
+	pinctrl-names = "default";
+
+	status = "okay";
+};
+
+&pcie0_phy {
+	vdda-phy-supply = <&vreg_l3i_0p88>;
+	vdda-pll-supply = <&vreg_l1d_1p2>;
+
+	status = "okay";
+};
+
+&pcieport0 {
+	wake-gpios = <&tlmm 104 GPIO_ACTIVE_HIGH>;
+	reset-gpios = <&tlmm 102 GPIO_ACTIVE_LOW>;
+
+	wifi@0 {
+		compatible = "pci17cb,110e";
+		reg = <0x10000 0x0 0x0 0x0 0x0>;
+
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
+		vddaon-supply = <&vreg_pmu_aon_0p59>;
+		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
+		vddwlmx-supply = <&vreg_pmu_wlmx_0p85>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p8-supply = <&vreg_pmu_rfa_1p8>;
+		vddpcie0p9-supply = <&vreg_pmu_pcie_0p9>;
+		vddpcie1p8-supply = <&vreg_pmu_pcie_1p8>;
+	};
 };
 
 &ufs_mem_phy {
