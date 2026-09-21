@@ -19,6 +19,7 @@
 
 #define QCN9274_DEVICE_ID		0x1109
 #define WCN7850_DEVICE_ID		0x1107
+#define PEACH_DEVICE_ID			0x110e
 #define QCC2072_DEVICE_ID		0x1112
 
 #define ATH12K_PCI_W7_SOC_HW_VERSION_1	1
@@ -34,6 +35,7 @@
 static const struct pci_device_id ath12k_wifi7_pci_id_table[] = {
 	{ PCI_VDEVICE(QCOM, QCN9274_DEVICE_ID) },
 	{ PCI_VDEVICE(QCOM, WCN7850_DEVICE_ID) },
+	{ PCI_VDEVICE(QCOM, PEACH_DEVICE_ID) },
 	{ PCI_VDEVICE(QCOM, QCC2072_DEVICE_ID) },
 	{}
 };
@@ -132,6 +134,13 @@ static int ath12k_wifi7_pci_probe(struct pci_dev *pdev,
 		}
 		break;
 	case WCN7850_DEVICE_ID:
+	/*
+	 * "peach" is the WCN7850-family compute SKU found on SM8750
+	 * tablets (Xiaomi Pad 8 Pro, PCI 17cb:110e, stock firmware dirs
+	 * wlan/qca_cld/peach*). Same probe path and firmware family as
+	 * WCN7850; the hardware-version register picks the revision.
+	 */
+	case PEACH_DEVICE_ID:
 		ab->id.bdf_search = ATH12K_BDF_SEARCH_BUS_AND_BOARD;
 		ab_pci->msi_config = &ath12k_wifi7_msi_config[0];
 		ab->static_window_map = false;
