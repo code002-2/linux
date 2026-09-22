@@ -1544,7 +1544,7 @@ CONFIG_SM_GPUCC_8650=m
 CONFIG_SM_GPUCC_8750=m
 CONFIG_SM_TCSRCC_8550=y
 CONFIG_SM_TCSRCC_8650=y
-CONFIG_SM_TCSRCC_8750=m
+CONFIG_SM_TCSRCC_8750=y
 CONFIG_SA_VIDEOCC_8775P=m
 CONFIG_SM_VIDEOCC_6350=m
 CONFIG_SM_VIDEOCC_MILOS=m
@@ -1937,3 +1937,24 @@ CONFIG_CORESIGHT_STM=m
 CONFIG_CORESIGHT_CPU_DEBUG=m
 CONFIG_CORESIGHT_CTI=m
 CONFIG_MEMTEST=y
+
+# --- Boot-critical console/boot contract (2026-09-23) -----------------------
+# Extracted from the device-verified working image piano-test-boot-usb31.img
+# (see umbrella runbook §7). These were previously only hand-accumulated in
+# out/.config and were silently lost on every `make piano_defconfig`, which
+# cost a full night of debugging — they are pinned here now.
+# Full golden config of the working kernel: out/usb31-golden.config (untracked).
+# CONFIG_INITRAMFS_SOURCE is deliberately not pinned: it names a machine-local
+# cpio.gz; set it in out/.config when embedding an initramfs.
+# DRM_PANIC QR screen (=y in the golden config) needs RUST=y and is omitted
+# here for CI portability; enable it locally if wanted.
+CONFIG_CMDLINE="console=tty0 loglevel=8 fbcon=font:TER16x32 rdinit=/beaconinit pd_ignore_unused clk_ignore_unused panic_on_oops=1 panic=-1"
+CONFIG_CMDLINE_FORCE=y
+CONFIG_DRM_SIMPLEDRM=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+CONFIG_FONTS=y
+CONFIG_FONT_TER16x32=y
+CONFIG_DEVMEM=y
+# CONFIG_STRICT_DEVMEM is not set
