@@ -1937,18 +1937,3 @@ CONFIG_CORESIGHT_STM=m
 CONFIG_CORESIGHT_CPU_DEBUG=m
 CONFIG_CORESIGHT_CTI=m
 CONFIG_MEMTEST=y
-# Early bring-up boot contract (verified on-device 2026-09-22):
-# ABL composes our RAM-booted image with the slot's stock vendor_boot and
-# dtbo, so the stock vendor cmdline would win unless we force our own.
-# rdinit must select an entry point the concatenated stock ramdisks cannot
-# overwrite (§7.3 of the device runbook).
-CONFIG_CMDLINE="console=tty0 loglevel=8 fbcon=font:TER16x32 rdinit=/beaconinit pd_ignore_unused clk_ignore_unused panic_on_oops=1 panic=-1"
-CONFIG_CMDLINE_FORCE=y
-# Legacy simplefb console on the dtbo framebuffer fragment (cont_splash);
-# DRM_SIMPLEDRM is intentionally not used here.
-CONFIG_FB_SIMPLE=y
-CONFIG_FONTS=y
-CONFIG_FONT_TER16x32=y
-# The debug beacon falls back to writing the splash region via /dev/mem.
-CONFIG_DEVMEM=y
-# CONFIG_STRICT_DEVMEM is not set
