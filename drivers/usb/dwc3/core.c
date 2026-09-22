@@ -2010,7 +2010,13 @@ static struct extcon_dev *dwc3_get_extcon(struct dwc3 *dwc)
 	struct extcon_dev *edev = NULL;
 	const char *name;
 
-	if (device_property_present(dev, "extcon"))
+	/*
+	 * A DT overlay cannot remove a property, only blank it. Treat an
+	 * empty "extcon" property as absent so blanked-out dependencies fall
+	 * through to the usb-role-switch / port-graph paths.
+	 */
+	if (dev->of_node && of_property_present(dev->of_node, "extcon") &&
+	    of_property_count_u32_elems(dev->of_node, "extcon") > 0)
 		return extcon_get_edev_by_phandle(dev, 0);
 
 	/*
