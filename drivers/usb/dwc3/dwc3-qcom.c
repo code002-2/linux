@@ -170,17 +170,24 @@ static int dwc3_qcom_interconnect_init(struct dwc3_qcom *qcom)
 	struct device *dev = qcom->dev;
 	int ret;
 
+	/*
+	 * Interconnect bandwidth voting is a performance optimisation, not a
+	 * functional requirement.  Boards without a live interconnect provider
+	 * (e.g. when the RPMh fabric is not up yet) must still enumerate USB:
+	 * degrade to no bandwidth voting instead of failing probe.
+	 */
 	qcom->icc_path_ddr = of_icc_get(dev, "usb-ddr");
 	if (IS_ERR(qcom->icc_path_ddr)) {
-		return dev_err_probe(dev, PTR_ERR(qcom->icc_path_ddr),
-				     "failed to get usb-ddr path\n");
+		dev_warn(dev, "usb-ddr icc path unavailable (%ld), continuing without\n",
+			 PTR_ERR(qcom->icc_path_ddr));
+		qcom->icc_path_ddr = NULL;
 	}
 
 	qcom->icc_path_apps = of_icc_get(dev, "apps-usb");
 	if (IS_ERR(qcom->icc_path_apps)) {
-		ret = dev_err_probe(dev, PTR_ERR(qcom->icc_path_apps),
-				    "failed to get apps-usb path\n");
-		goto put_path_ddr;
+		dev_warn(dev, "apps-usb icc path unavailable (%ld), continuing without\n",
+			 PTR_ERR(qcom->icc_path_apps));
+		qcom->icc_path_apps = NULL;
 	}
 
 	max_speed = usb_get_maximum_speed(qcom->dwc.dev);
