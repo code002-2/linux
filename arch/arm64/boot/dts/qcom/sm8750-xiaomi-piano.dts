@@ -39,14 +39,11 @@
 	chassis-type = "tablet";
 
 	/*
-	 * (R) Qualcomm ABL matches the boot-image DTB against the hardware
-	 * IDs reported by XBL via these two properties; without them every
-	 * boot attempt is rejected with "Failed to load/authenticate boot
-	 * image: Load Error" (observed on-device 2026-09-22, both RAM boot
-	 * and slot boot). Values copied verbatim from the stock vendor_boot
-	 * DTB (local/dtb-downstream/vbdtb-00.dts).
+	 * (R) Qualcomm ABL matches these properties against the hardware.
+	 * Stock Android reports soc_id=639 (SUNP), revision=2.0 and dtb_idx=4;
+	 * use the IDs from the selected stock vendor_boot DTB, not index 0.
 	 */
-	qcom,msm-id = <0x100026a 0x20000>;
+	qcom,msm-id = <0x100027f 0x20000>;
 	qcom,board-id = <0x00 0x00>;
 
 	aliases {
