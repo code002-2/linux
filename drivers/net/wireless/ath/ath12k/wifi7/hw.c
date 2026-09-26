@@ -804,6 +804,102 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 		.host_alloc_ml_id = false,
 	},
 	{
+		.name = "peach hw2.0",
+		.hw_rev = ATH12K_HW_PEACH_HW20,
+
+		.fw = {
+			.dir = "PEACH/hw2.0",
+			.board_size = 256 * 1024,
+			.cal_offset = 256 * 1024,
+			.m3_loader = ath12k_m3_fw_loader_driver,
+			.download_aux_ucode = true,
+			.download_tme_lite = true,
+			.board_api1_only = true,
+		},
+
+		.max_radios = 1,
+		.single_pdev_only = true,
+		.qmi_service_ins_id = ATH12K_QMI_WLFW_SERVICE_INS_ID_V01_WCN7850,
+		.internal_sleep_clock = false,
+
+		/* Peach v2 uses the QCC2072 datapath with the WCN7850 CE layout. */
+		.hw_ops = &qcc2072_ops,
+		.ring_mask = &ath12k_wifi7_hw_ring_mask_wcn7850,
+
+		.host_ce_config = ath12k_wifi7_host_ce_config_wcn7850,
+		.ce_count = 9,
+		.target_ce_config = ath12k_wifi7_target_ce_config_wlan_wcn7850,
+		.target_ce_count = 9,
+		.svc_to_ce_map =
+			ath12k_wifi7_target_service_to_ce_map_wlan_wcn7850,
+		.svc_to_ce_map_len = 14,
+
+		.rxdma1_enable = false,
+		.num_rxdma_per_pdev = 2,
+		.num_rxdma_dst_ring = 1,
+		.rx_mac_buf_ring = true,
+		.vdev_start_delay = true,
+
+		.interface_modes = BIT(NL80211_IFTYPE_STATION) |
+				   BIT(NL80211_IFTYPE_AP) |
+				   BIT(NL80211_IFTYPE_P2P_DEVICE) |
+				   BIT(NL80211_IFTYPE_P2P_CLIENT) |
+				   BIT(NL80211_IFTYPE_P2P_GO),
+		.supports_monitor = true,
+
+		.idle_ps = true,
+		.download_calib = false,
+		.supports_suspend = true,
+		.tcl_ring_retry = false,
+		.reoq_lut_support = false,
+		.supports_shadow_regs = true,
+
+		.num_tcl_banks = 7,
+		.max_tx_ring = 3,
+
+		.mhi_config = &ath12k_wifi7_mhi_config_wcn7850,
+
+		.wmi_init = ath12k_wifi7_wmi_init_wcn7850,
+
+		.qmi_cnss_feature_bitmap = BIT(CNSS_WLAN_EN_SUPPORT_V01) |
+					   BIT(CNSS_AUX_UC_SUPPORT_V01),
+
+		.rfkill_pin = 0,
+		.rfkill_cfg = 0,
+		.rfkill_on_level = 0,
+
+		.rddm_size = 0x780000,
+
+		.def_num_link = 2,
+		.max_mlo_peer = 32,
+
+		.otp_board_id_register = 0,
+
+		.supports_sta_ps = true,
+
+		.acpi_guid = &wcn7850_uuid,
+		.supports_dynamic_smps_6ghz = false,
+
+		.iova_mask = 0,
+
+		.supports_aspm = true,
+
+		.ce_ie_addr = NULL,
+		.ce_remap = NULL,
+		.bdf_addr_offset = 0,
+
+		.current_cc_support = true,
+
+		.dp_primary_link_only = false,
+		.client = {
+			.max_client_single = 512,
+			.max_client_dbs = 128,
+			.max_client_dbs_sbs = 128,
+		},
+
+		.host_alloc_ml_id = false,
+	},
+	{
 		.name = "ipq5424 hw1.0",
 		.hw_rev = ATH12K_HW_IPQ5424_HW10,
 		.fw = {

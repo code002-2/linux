@@ -97,6 +97,7 @@ struct ieee80211_rx_status;
 #define ATH12K_AMSS_FILE		"amss.bin"
 #define ATH12K_M3_FILE			"m3.bin"
 #define ATH12K_AUX_UC_FILE		"aux_ucode.bin"
+#define ATH12K_TME_LITE_FILE		"tmel.bin"
 #define ATH12K_REGDB_FILE_NAME		"regdb.bin"
 
 #define ATH12K_PCIE_MAX_PAYLOAD_SIZE	128
@@ -162,6 +163,8 @@ struct ath12k_hw_params {
 		size_t cal_offset;
 		enum ath12k_m3_fw_loaders m3_loader;
 		bool download_aux_ucode:1;
+		bool download_tme_lite:1;
+		bool board_api1_only:1;
 	} fw;
 
 	u8 max_radios;

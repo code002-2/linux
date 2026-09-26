@@ -850,8 +850,11 @@ static int ath12k_pci_claim(struct ath12k_pci *ab_pci, struct pci_dev *pdev)
 	}
 
 	ab_pci->dma_mask = DMA_BIT_MASK(ATH12K_PCI_DMA_MASK);
-	dma_set_mask(&pdev->dev, ab_pci->dma_mask);
-	dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+	ret = dma_set_mask_and_coherent(&pdev->dev, ab_pci->dma_mask);
+	if (ret) {
+		ath12k_err(ab, "failed to set DMA mask: %d\n", ret);
+		goto release_region;
+	}
 
 	pci_set_master(pdev);
 
@@ -1850,3 +1853,4 @@ EXPORT_SYMBOL(ath12k_pci_unregister_driver);
 /* firmware files */
 MODULE_FIRMWARE(ATH12K_FW_DIR "/QCN9274/hw2.0/*");
 MODULE_FIRMWARE(ATH12K_FW_DIR "/WCN7850/hw2.0/*");
+MODULE_FIRMWARE(ATH12K_FW_DIR "/PEACH/hw2.0/*");

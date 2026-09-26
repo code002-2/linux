@@ -74,6 +74,8 @@ enum qca_baudrate {
 	QCA_BAUDRATE_1600000,
 	QCA_BAUDRATE_3200000,
 	QCA_BAUDRATE_3500000,
+	/* Brahma v2 uses Qualcomm vendor baud code 0x15 for 8 Mbaud. */
+	QCA_BAUDRATE_8000000	= 0x15,
 	QCA_BAUDRATE_AUTO	= 0xFE,
 	QCA_BAUDRATE_RESERVED
 };
@@ -97,6 +99,7 @@ struct qca_fw_config {
 	uint8_t user_baud_rate;
 	enum qca_tlv_dnld_mode dnld_mode;
 	enum qca_tlv_dnld_mode dnld_type;
+	bool current_baud_download;
 	bdaddr_t bdaddr;
 };
 
@@ -158,6 +161,7 @@ enum qca_btsoc_type {
 	QCA_WCN6750,
 	QCA_WCN6855,
 	QCA_WCN7850,
+	QCA_WCN7861,
 };
 
 #if IS_ENABLED(CONFIG_BT_QCA)

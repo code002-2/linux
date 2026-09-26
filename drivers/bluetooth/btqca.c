@@ -478,7 +478,8 @@ static int qca_tlv_check_data(struct hci_dev *hdev,
 
 static int qca_tlv_send_segment(struct hci_dev *hdev, int seg_size,
 				const u8 *data, enum qca_tlv_dnld_mode mode,
-				enum qca_btsoc_type soc_type)
+				enum qca_btsoc_type soc_type,
+				bool current_baud_download)
 {
 	struct sk_buff *skb;
 	struct edl_event_hdr *edl;
@@ -493,9 +494,20 @@ static int qca_tlv_send_segment(struct hci_dev *hdev, int seg_size,
 	cmd[1] = seg_size;
 	memcpy(cmd + 2, data, seg_size);
 
-	if (mode == QCA_SKIP_EVT_VSE_CC || mode == QCA_SKIP_EVT_VSE)
-		return __hci_cmd_send(hdev, EDL_PATCH_CMD_OPCODE, seg_size + 2,
-				      cmd);
+	if (mode == QCA_SKIP_EVT_VSE_CC || mode == QCA_SKIP_EVT_VSE) {
+		err = __hci_cmd_send(hdev, EDL_PATCH_CMD_OPCODE, seg_size + 2,
+				     cmd);
+		/*
+		 * The Peach tuple exemption keeps the live transport at 115200.
+		 * Pace unacknowledged packets so the final synchronous command is
+		 * not queued behind the entire 219-KiB rampatch while its fixed HCI
+		 * command timer is already running.
+		 */
+		if (!err && current_baud_download)
+			usleep_range(24000, 25000);
+
+		return err;
+	}
 
 	/* Unlike other SoC's sending version command response as payload to
 	 * VSE event. WCN3991 sends version command response as a payload to
@@ -631,7 +643,8 @@ static int qca_download_firmware(struct hci_dev *hdev,
 			config->dnld_mode = QCA_SKIP_EVT_NONE;
 
 		ret = qca_tlv_send_segment(hdev, segsize, segment,
-					   config->dnld_mode, soc_type);
+					   config->dnld_mode, soc_type,
+					   config->current_baud_download);
 		if (ret)
 			goto out;
 
@@ -783,6 +796,16 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 	bt_dev_info(hdev, "QCA controller version 0x%08x", soc_ver);
 
 	config.user_baud_rate = baudrate;
+	if (soc_type == QCA_WCN7861) {
+		u32 product_id = le32_to_cpu(ver.product_id);
+		u32 soc_id = le32_to_cpu(ver.soc_id);
+		u16 tuple_rom = le16_to_cpu(ver.rom_ver);
+
+		config.current_baud_download =
+			((soc_id == 0x40210100 && tuple_rom == 0x0100) ||
+			 (soc_id == 0x40210200 && tuple_rom == 0x0200)) &&
+			(product_id == 0x1e || product_id == 0x21);
+	}
 
 	/* Firmware files to download are based on ROM version.
 	 * ROM version is derived from last two bytes of soc_ver.
@@ -842,6 +865,7 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 				 "qca/wcnhpbtfw%02x.tlv", rom_ver);
 			break;
 		case QCA_WCN7850:
+	case QCA_WCN7861:
 			snprintf(config.fwname, sizeof(config.fwname),
 				 "qca/hmtbtfw%02x.tlv", rom_ver);
 			break;
@@ -878,7 +902,8 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 	/* Give the controller some time to get ready to receive the NVM */
 	msleep(10);
 
-	if (soc_type == QCA_QCA2066 || soc_type == QCA_WCN7850)
+	if (soc_type == QCA_QCA2066 || soc_type == QCA_WCN7850 ||
+	    soc_type == QCA_WCN7861)
 		qca_read_fw_board_id(hdev, &boardid);
 
 	/* Download NVM configuration */
@@ -936,6 +961,7 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 						  "wcnhpnv", soc_type, ver, rom_ver, boardid);
 			break;
 		case QCA_WCN7850:
+	case QCA_WCN7861:
 			qca_get_nvm_name_by_board(config.fwname, sizeof(config.fwname),
 				 "hmtnv", soc_type, ver, rom_ver, boardid);
 			break;
@@ -965,6 +991,7 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 	case QCA_WCN6750:
 	case QCA_WCN6855:
 	case QCA_WCN7850:
+	case QCA_WCN7861:
 		err = qca_disable_soc_logging(hdev);
 		if (err < 0)
 			return err;
@@ -1001,6 +1028,7 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 	case QCA_WCN6750:
 	case QCA_WCN6855:
 	case QCA_WCN7850:
+	case QCA_WCN7861:
 		/* get fw build info */
 		err = qca_read_fw_build_info(hdev);
 		if (err < 0)

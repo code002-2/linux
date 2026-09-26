@@ -27,6 +27,7 @@
 #include <linux/pci-pwrctrl.h>
 #include <linux/pm_opp.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
 #include <linux/platform_device.h>
 #include <linux/phy/pcie.h>
 #include <linux/phy/phy.h>
@@ -1222,22 +1223,21 @@ static void qcom_pcie_deinit_2_7_0(struct qcom_pcie *pcie)
 
 static int qcom_pcie_config_sid_1_9_0(struct qcom_pcie *pcie)
 {
-	/* iommu map structure */
-	struct {
+	struct qcom_pcie_sid_map {
 		u32 bdf;
-		u32 phandle;
 		u32 smmu_sid;
-		u32 smmu_sid_len;
 	} *map;
 	void __iomem *bdf_to_sid_base = pcie->parf + PARF_BDF_TO_SID_TABLE_N;
 	struct device *dev = pcie->pci->dev;
+	const __be32 *iommu_map, *cur, *end;
 	u8 qcom_pcie_crc8_table[CRC8_TABLE_SIZE];
-	int i, nr_map, size = 0;
+	int i, nr_map = 0, max_map, size = 0;
 	u32 smmu_sid_base;
 	u32 val;
+	int ret = 0;
 
-	of_get_property(dev->of_node, "iommu-map", &size);
-	if (!size)
+	iommu_map = of_get_property(dev->of_node, "iommu-map", &size);
+	if (!iommu_map || !size)
 		return 0;
 
 	/* Enable BDF to SID translation by disabling bypass mode (default) */
@@ -1245,14 +1245,44 @@ static int qcom_pcie_config_sid_1_9_0(struct qcom_pcie *pcie)
 	val &= ~BDF_TO_SID_BYPASS;
 	writel(val, pcie->parf + PARF_BDF_TO_SID_CFG);
 
-	map = kzalloc(size, GFP_KERNEL);
+	/* Each iommu-map entry is:
+	 *   RID, IOMMU phandle, #iommu-cells arguments, length.
+	 * Do not cast the property to a fixed four-cell structure: SM8750's
+	 * apps SMMU has #iommu-cells = <2>, so every entry occupies five cells.
+	 */
+	max_map = size / (4 * sizeof(u32));
+	map = kcalloc(max_map, sizeof(*map), GFP_KERNEL);
 	if (!map)
 		return -ENOMEM;
 
-	of_property_read_u32_array(dev->of_node, "iommu-map", (u32 *)map,
-				   size / sizeof(u32));
+	cur = iommu_map;
+	end = iommu_map + size / sizeof(*iommu_map);
+	while (cur < end) {
+		struct device_node *iommu_np;
+		u32 phandle, iommu_cells;
 
-	nr_map = size / (sizeof(*map));
+		if (end - cur < 4 || nr_map == max_map) {
+			ret = -EINVAL;
+			goto free_map;
+		}
+
+		map[nr_map].bdf = be32_to_cpup(cur++);
+		phandle = be32_to_cpup(cur++);
+		iommu_np = of_find_node_by_phandle(phandle);
+		if (!iommu_np ||
+		    of_property_read_u32(iommu_np, "#iommu-cells", &iommu_cells) ||
+		    iommu_cells < 1 || end - cur < iommu_cells + 1) {
+			of_node_put(iommu_np);
+			ret = -EINVAL;
+			goto free_map;
+		}
+
+		map[nr_map].smmu_sid = be32_to_cpup(cur);
+		cur += iommu_cells;
+		cur++; /* mapping length */
+		of_node_put(iommu_np);
+		nr_map++;
+	}
 
 	crc8_populate_msb(qcom_pcie_crc8_table, QCOM_PCIE_CRC8_POLYNOMIAL);
 
@@ -1291,9 +1321,10 @@ static int qcom_pcie_config_sid_1_9_0(struct qcom_pcie *pcie)
 		writel(val, bdf_to_sid_base + hash * sizeof(u32));
 	}
 
+free_map:
 	kfree(map);
 
-	return 0;
+	return ret;
 }
 
 static int qcom_pcie_get_resources_2_9_0(struct qcom_pcie *pcie)
@@ -2344,6 +2375,9 @@ static int qcom_pcie_suspend_noirq(struct device *dev)
 		if (pcie->use_pm_opp)
 			dev_pm_opp_set_opp(pcie->pci->dev, NULL);
 	} else {
+		/* The active controller still needs its power domain. */
+		device_set_awake_path(dev);
+
 		/*
 		 * Set minimum bandwidth required to keep data path
 		 * functional during suspend.

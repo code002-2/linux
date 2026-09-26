@@ -123,10 +123,7 @@ static const struct of_device_id pwrseq_pwrctrl_of_match[] = {
 		.data = &pwrseq_pwrctrl_qcom_wcn_pdata,
 	},
 	{
-		/*
-		 * ATH12K in the WCN7850-family "peach" compute SKU found
-		 * on SM8750 tablets (Xiaomi Pad 8 Pro / piano).
-		 */
+		/* ATH12K Peach v2 (WCN7880 family): Lenovo elden, Xiaomi piano. */
 		.compatible = "pci17cb,110e",
 		.data = &pwrseq_pwrctrl_qcom_wcn_pdata,
 	},

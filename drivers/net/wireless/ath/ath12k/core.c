@@ -533,6 +533,9 @@ int ath12k_core_fetch_bdf(struct ath12k_base *ab, struct ath12k_board_data *bd)
 		return ret;
 	}
 
+	if (ab->hw_params->fw.board_api1_only)
+		goto api1;
+
 	bd_api = 2;
 	ret = ath12k_core_fetch_board_data_api_n(ab, bd, boardname,
 						 ATH12K_BD_IE_BOARD,
@@ -555,6 +558,7 @@ int ath12k_core_fetch_bdf(struct ath12k_base *ab, struct ath12k_board_data *bd)
 	if (!ret)
 		goto success;
 
+api1:
 	bd_api = 1;
 	ret = ath12k_core_fetch_board_data_api_1(ab, bd, ATH12K_DEFAULT_BOARD_FILE);
 	if (ret) {
@@ -572,7 +576,11 @@ int ath12k_core_fetch_bdf(struct ath12k_base *ab, struct ath12k_board_data *bd)
 	}
 
 success:
-	ath12k_dbg(ab, ATH12K_DBG_BOOT, "using board api %d\n", bd_api);
+	if (ab->hw_params->fw.board_api1_only)
+		ath12k_dbg(ab, ATH12K_DBG_BOOT,
+			   "using board API 1 data (%zu bytes)\n", bd->len);
+	else
+		ath12k_dbg(ab, ATH12K_DBG_BOOT, "using board api %d\n", bd_api);
 	return 0;
 }
 
@@ -580,6 +588,9 @@ int ath12k_core_fetch_regdb(struct ath12k_base *ab, struct ath12k_board_data *bd
 {
 	char boardname[BOARD_NAME_SIZE], default_boardname[BOARD_NAME_SIZE];
 	int ret;
+
+	if (ab->hw_params->fw.board_api1_only)
+		goto api1;
 
 	ret = ath12k_core_create_board_name(ab, boardname, BOARD_NAME_SIZE);
 	if (ret) {
@@ -610,14 +621,20 @@ int ath12k_core_fetch_regdb(struct ath12k_base *ab, struct ath12k_board_data *bd
 	if (!ret)
 		goto exit;
 
+api1:
 	ret = ath12k_core_fetch_board_data_api_1(ab, bd, ATH12K_REGDB_FILE_NAME);
 	if (ret)
 		ath12k_dbg(ab, ATH12K_DBG_BOOT, "failed to fetch %s from %s\n",
 			   ATH12K_REGDB_FILE_NAME, ab->hw_params->fw.dir);
 
 exit:
-	if (!ret)
-		ath12k_dbg(ab, ATH12K_DBG_BOOT, "fetched regdb\n");
+	if (!ret) {
+		if (ab->hw_params->fw.board_api1_only)
+			ath12k_dbg(ab, ATH12K_DBG_BOOT,
+				   "using REGDB API 1 data (%zu bytes)\n", bd->len);
+		else
+			ath12k_dbg(ab, ATH12K_DBG_BOOT, "fetched regdb\n");
+	}
 
 	return ret;
 }

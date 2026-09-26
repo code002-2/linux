@@ -29,13 +29,18 @@
 #define ATH12K_QMI_FW_MEM_REQ_SEGMENT_CNT	3
 #define ATH12K_QMI_WLFW_MAX_DEV_MEM_NUM_V01 4
 #define ATH12K_QMI_DEVMEM_CMEM_INDEX	0
+#define ATH12K_QMI_WLFW_PMU_PARAMS_MAX_V01	16
+#define ATH12K_QMI_WLFW_PMU_PIN_NAME_MAX_LEN_V01	32
 
 #define QMI_WLFW_REQUEST_MEM_IND_V01		0x0035
 #define QMI_WLFW_FW_MEM_READY_IND_V01		0x0037
 #define QMI_WLFW_FW_READY_IND_V01		0x0038
+#define QMI_WLFW_QDSS_TRACE_CONFIG_DOWNLOAD_REQ_V01	0x0044
+#define QMI_WLFW_QDSS_TRACE_CONFIG_DOWNLOAD_REQ_MSG_V01_MAX_LEN 6167
 
 #define QMI_WLANFW_MAX_DATA_SIZE_V01		6144
 #define ATH12K_FIRMWARE_MODE_OFF		4
+#define ATH12K_QMI_QDSS_CFG_FILE		"qdss_trace_config.bin"
 
 #define ATH12K_BOARD_ID_DEFAULT	0xFF
 
@@ -112,6 +117,7 @@ struct target_info {
 	u32 board_id;
 	u32 soc_id;
 	u32 fw_version;
+	u64 fw_caps;
 	u32 eeprom_caldata;
 	char fw_build_timestamp[ATH12K_QMI_WLANFW_MAX_TIMESTAMP_LEN_V01 + 1];
 	char fw_build_id[ATH12K_QMI_WLANFW_MAX_BUILD_ID_LEN_V01 + 1];
@@ -154,6 +160,7 @@ struct ath12k_qmi {
 	struct target_info target;
 	struct m3_mem_region m3_mem;
 	struct m3_mem_region aux_uc_mem;
+	struct m3_mem_region tme_lite_mem;
 	unsigned int service_ins_id;
 	struct dev_mem_info dev_mem[ATH12K_QMI_WLFW_MAX_DEV_MEM_NUM_V01];
 };
@@ -201,6 +208,7 @@ struct wlfw_host_mlo_chip_info_s_v01 {
 
 enum ath12k_qmi_cnss_feature {
 	CNSS_FEATURE_MIN_ENUM_VAL_V01 = INT_MIN,
+	CNSS_WLAN_EN_SUPPORT_V01 = 2,
 	CNSS_QDSS_CFG_MISS_V01 = 3,
 	CNSS_PCIE_PERST_NO_PULL_V01 = 4,
 	CNSS_AUX_UC_SUPPORT_V01 = 6,
@@ -380,8 +388,13 @@ struct qmi_wlanfw_fw_mem_ready_ind_msg_v01 {
 	char placeholder;
 };
 
-struct qmi_wlanfw_fw_ready_ind_msg_v01 {
-	char placeholder;
+struct qmi_wlanfw_fw_init_done_ind_msg_v01 {
+	u8 hang_data_addr_offset_valid;
+	u32 hang_data_addr_offset;
+	u8 hang_data_length_valid;
+	u16 hang_data_length;
+	u8 soft_sku_features_valid;
+	u64 soft_sku_features;
 };
 
 #define QMI_WLANFW_CAP_REQ_MSG_V01_MAX_LEN	0
@@ -448,6 +461,20 @@ struct qmi_wlanfw_dev_mem_info_s_v01 {
 	u64 size;
 };
 
+struct qmi_wlanfw_pmu_param_v01 {
+	u8 pin_name[ATH12K_QMI_WLFW_PMU_PIN_NAME_MAX_LEN_V01];
+	u32 wake_volt_valid;
+	u32 wake_volt;
+	u32 sleep_volt_valid;
+	u32 sleep_volt;
+};
+
+struct qmi_wlanfw_pmu_cfg_v01 {
+	u32 pmu_param_len;
+	struct qmi_wlanfw_pmu_param_v01
+		pmu_param[ATH12K_QMI_WLFW_PMU_PARAMS_MAX_V01];
+};
+
 enum qmi_wlanfw_cal_temp_id_enum_v01 {
 	QMI_WLANFW_CAL_TEMP_IDX_0_V01 = 0,
 	QMI_WLANFW_CAL_TEMP_IDX_1_V01 = 1,
@@ -464,6 +491,8 @@ enum qmi_wlanfw_rd_card_chain_cap_v01 {
 	WLFW_RD_CARD_CHAIN_CAP_2x2_V01 = 2,
 	WLFW_RD_CARD_CHAIN_CAP_MAX_VAL_V01 = INT_MAX,
 };
+
+#define QMI_WLANFW_AUX_UC_SUPPORT_V01	BIT_ULL(2)
 
 struct qmi_wlanfw_cap_resp_msg_v01 {
 	struct qmi_response_type_v01 resp;
@@ -493,6 +522,8 @@ struct qmi_wlanfw_cap_resp_msg_v01 {
 	enum qmi_wlanfw_rd_card_chain_cap_v01 rd_card_chain_cap;
 	u8 dev_mem_info_valid;
 	struct qmi_wlanfw_dev_mem_info_s_v01 dev_mem[ATH12K_QMI_WLFW_MAX_DEV_MEM_NUM_V01];
+	u8 ol_cpr_cfg_valid;
+	struct qmi_wlanfw_pmu_cfg_v01 ol_cpr_cfg;
 };
 
 struct qmi_wlanfw_cap_req_msg_v01 {
@@ -528,6 +559,22 @@ struct qmi_wlanfw_bdf_download_resp_msg_v01 {
 	struct qmi_response_type_v01 resp;
 };
 
+struct qmi_wlanfw_qdss_trace_config_download_req_msg_v01 {
+	u8 total_size_valid;
+	u32 total_size;
+	u8 seg_id_valid;
+	u32 seg_id;
+	u8 data_valid;
+	u32 data_len;
+	u8 data[QMI_WLANFW_MAX_DATA_SIZE_V01];
+	u8 end_valid;
+	u8 end;
+};
+
+struct qmi_wlanfw_qdss_trace_config_download_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+};
+
 #define QMI_WLANFW_M3_INFO_REQ_MSG_V01_MAX_MSG_LEN	18
 #define QMI_WLANFW_M3_INFO_RESP_MSG_V01_MAX_MSG_LEN	7
 #define QMI_WLANFW_M3_INFO_RESP_V01		0x003C
@@ -552,6 +599,28 @@ struct qmi_wlanfw_aux_uc_info_req_msg_v01 {
 };
 
 struct qmi_wlanfw_aux_uc_info_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+};
+
+enum qmi_wlanfw_tme_lite_file_type_v01 {
+	WLFW_TME_LITE_FILE_TYPE_MIN_VAL_V01 = INT_MIN,
+	WLFW_TME_LITE_PATCH_FILE_V01 = 0,
+	WLFW_TME_LITE_OEM_FUSE_FILE_V01 = 1,
+	WLFW_TME_LITE_RPR_FILE_V01 = 2,
+	WLFW_TME_LITE_DPR_FILE_V01 = 3,
+	WLFW_TME_LITE_FILE_TYPE_MAX_VAL_V01 = INT_MAX,
+};
+
+#define QMI_WLANFW_TME_LITE_INFO_REQ_MSG_V01_MAX_MSG_LEN	25
+#define QMI_WLANFW_TME_LITE_INFO_REQ_V01			0x005B
+
+struct qmi_wlanfw_tme_lite_info_req_msg_v01 {
+	enum qmi_wlanfw_tme_lite_file_type_v01 tme_file;
+	u64 addr;
+	u32 size;
+};
+
+struct qmi_wlanfw_tme_lite_info_resp_msg_v01 {
 	struct qmi_response_type_v01 resp;
 };
 
