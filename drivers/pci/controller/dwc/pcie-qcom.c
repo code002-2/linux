@@ -997,6 +997,46 @@ static int qcom_pcie_get_resources_2_7_0(struct qcom_pcie *pcie)
 	return 0;
 }
 
+/* Piano bring-up only: observe GCC without changing its power votes. */
+static int qcom_pcie_piano_check_gdsc(struct device *dev, const char *phase)
+{
+	void __iomem *core, *phy, *vote;
+	u32 core_cfg;
+	int ret = -ENOMEM;
+
+	if (!of_device_is_compatible(dev->of_node, "qcom,pcie-sm8750"))
+		return 0;
+
+	/* gcc-sm8750.c and downstream sun.dtsi agree on these addresses. */
+	core = ioremap(0x00100000 + 0x6b004, 8);
+	if (!core)
+		return ret;
+	phy = ioremap(0x00100000 + 0x6c000, 8);
+	if (!phy)
+		goto unmap_core;
+	vote = ioremap(0x00100000 + 0x5214c, 4);
+	if (!vote)
+		goto unmap_phy;
+
+	dev_info(dev, "piano-dbg: %s GCC snapshot begin\n", phase);
+	core_cfg = readl(core + 4);
+	dev_info(dev, "piano-dbg: %s core=%08x core_cfg=%08x phy=%08x phy_cfg=%08x vote=%08x\n",
+		 phase, readl(core), core_cfg, readl(phy),
+		 readl(phy + 4), readl(vote));
+	/* POLL_CFG_GDSCR checks power-up complete in CFG_GDSCR bit 16. */
+	ret = core_cfg & BIT(16) ? 0 : -EIO;
+	if (ret)
+		dev_err(dev, "piano-dbg: %s core GDSC not up; stopping before PARF\n",
+			phase);
+
+	iounmap(vote);
+unmap_phy:
+	iounmap(phy);
+unmap_core:
+	iounmap(core);
+	return ret;
+}
+
 static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 {
 	struct qcom_pcie_resources_2_7_0 *res = &pcie->res.v2_7_0;
@@ -1018,10 +1058,14 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 	dev_info(dev, "piano-dbg: init clocks on (%d)\n", res->num_clks);
 
 	/*
-	 * Bring-up only: keep the BCR order unchanged while measuring the
-	 * runtime-PM attempt below. R15 tried a mistyped GCC address before
-	 * either runtime-PM call; the complete exception trace is missing.
+	 * Bring-up only: R15 used an invalid diagnostic address before its
+	 * proposed PM cycle. Keep the original BCR order, but measure the
+	 * domain before and after it. Do not cycle a live clocked domain.
 	 */
+	ret = qcom_pcie_piano_check_gdsc(dev, "before BCR");
+	if (ret)
+		goto err_disable_clocks;
+
 	dev_info(dev, "piano-dbg: asserting BCR\n");
 	ret = reset_control_assert(res->rst);
 	if (ret) {
@@ -1034,60 +1078,10 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		dev_err(dev, "reset deassert failed (%d)\n", ret);
 		goto err_disable_clocks;
 	}
-	if (of_device_is_compatible(dev->of_node, "qcom,pcie-sm8750")) {
-		void __iomem *gdscr, *vote;
-		u32 cfg;
-
-		/* GCC base + offsets from gcc-sm8750.c; CFG_GDSCR is +4. */
-		gdscr = devm_ioremap(dev, 0x00100000 + 0x6b004, 8);
-		vote = devm_ioremap(dev, 0x00100000 + 0x5214c, 4);
-		if (!gdscr || !vote) {
-			ret = -ENOMEM;
-			goto err_disable_clocks;
-		}
-
-		dev_info(dev, "piano-dbg: BCR cycled; reading GCC 0x16b004/0x16b008/0x15214c\n");
-		dev_info(dev, "piano-dbg: pre-PM GDSCR=%08x CFG=%08x vote=%08x usage=%d suspended=%d\n",
-			 readl(gdscr), readl(gdscr + 4), readl(vote),
-			 atomic_read(&dev->power.usage_count),
-			 pm_runtime_suspended(dev));
-		dev_info(dev, "piano-dbg: calling pm_runtime_put_sync\n");
-		ret = pm_runtime_put_sync(dev);
-		dev_info(dev, "piano-dbg: put_sync ret=%d usage=%d suspended=%d\n",
-			 ret, atomic_read(&dev->power.usage_count),
-			 pm_runtime_suspended(dev));
-		if (ret < 0) {
-			/* put_sync drops the reference even on failure. */
-			pm_runtime_get_noresume(dev);
-			goto err_disable_clocks;
-		}
-
-		dev_info(dev, "piano-dbg: after put GDSCR=%08x CFG=%08x vote=%08x\n",
-			 readl(gdscr), readl(gdscr + 4), readl(vote));
-		dev_info(dev, "piano-dbg: calling pm_runtime_get_sync\n");
-		ret = pm_runtime_get_sync(dev);
-		dev_info(dev, "piano-dbg: get_sync ret=%d usage=%d suspended=%d\n",
-			 ret, atomic_read(&dev->power.usage_count),
-			 pm_runtime_suspended(dev));
-		if (ret < 0) {
-			dev_err(dev, "runtime resume failed (%d)\n", ret);
-			goto err_disable_clocks;
-		}
-
-		cfg = readl(gdscr + 4);
-		dev_info(dev, "piano-dbg: after get GDSCR=%08x CFG=%08x vote=%08x\n",
-			 readl(gdscr), cfg, readl(vote));
-		devm_iounmap(dev, gdscr);
-		devm_iounmap(dev, vote);
-		/* POLL_CFG_GDSCR uses CFG bit 16 for power-up complete. */
-		if (!(cfg & BIT(16))) {
-			dev_err(dev, "piano-dbg: GDSC not up; stopping before PARF\n");
-			ret = -EIO;
-			goto err_disable_clocks;
-		}
-		dev_info(dev, "piano-dbg: PM attempt complete (not proof of a domain cycle)\n");
-	}
 	usleep_range(1000, 1500);
+	ret = qcom_pcie_piano_check_gdsc(dev, "after BCR");
+	if (ret)
+		goto err_disable_clocks;
 
 
 	dev_info(dev, "piano-dbg: P1 device-type\n");
