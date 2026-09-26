@@ -594,9 +594,17 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 	}
 
 	if (pci_msi_enabled()) {
-		pp->use_imsi_rx = !(pp->ops->msi_init ||
-				     of_property_present(np, "msi-parent") ||
-				     of_property_present(np, "msi-map"));
+		int msi_parent_len = 0, msi_map_len = 0;
+
+		/*
+		 * piano: a DT overlay cannot delete a property, only empty it;
+		 * treat zero-length msi-parent/msi-map as absent so the
+		 * internal (iMSI-RX) controller is used.
+		 */
+		of_get_property(np, "msi-parent", &msi_parent_len);
+		of_get_property(np, "msi-map", &msi_map_len);
+		pp->use_imsi_rx = !(pp->ops->msi_init || msi_parent_len > 0 ||
+				    msi_map_len > 0);
 
 		/*
 		 * For the use_imsi_rx case the default assignment is handled
