@@ -1965,7 +1965,7 @@ static int qcom_pcie_parse_ports(struct qcom_pcie *pcie)
 
 	for_each_available_child_of_node_scoped(dev->of_node, of_port) {
 		dev_info(dev, "piano-dbg: child %pOF type=%s\n", of_port,
-			 of_node_get_property(of_port, "device_type", NULL) ? : "(none)");
+			 of_get_property(of_port, "device_type", NULL) ? : "(none)");
 		if (!of_node_is_type(of_port, "pci"))
 			continue;
 		n_ports++;
