@@ -4858,6 +4858,23 @@ static void qmp_pcie_init_registers(struct qmp_pcie *qmp, const struct qmp_phy_c
 	qmp_configure(qmp->dev, ln_shrd, tbls->ln_shrd, tbls->ln_shrd_num);
 }
 
+/*
+ * Piano bring-up only: on the Xiaomi Pad 8 Pro (SM8750) asserting the PCIe
+ * core BCR reset the whole SoC (R16), and R18 died at the next BCR assert,
+ * the PHY one.  Allow the first init to program the PHY without toggling
+ * its BCR; the PHY GDSC has just been powered, so the PHY is in its reset
+ * state anyway.
+ */
+static bool piano_skip_bcr;
+module_param(piano_skip_bcr, bool, 0644);
+MODULE_PARM_DESC(piano_skip_bcr, "piano bring-up: do not toggle the PHY BCR");
+
+#define PIANO_MARK(dev, fmt, ...)					\
+	do {								\
+		dev_info(dev, "piano-dbg: " fmt "\n", ##__VA_ARGS__);	\
+		msleep(30);						\
+	} while (0)
+
 static int qmp_pcie_init(struct phy *phy)
 {
 	struct qmp_pcie *qmp = phy_get_drvdata(phy);
@@ -4889,11 +4906,14 @@ static int qmp_pcie_init(struct phy *phy)
 		return ret;
 	}
 
+	PIANO_MARK(qmp->dev, "Q1 phy init (skip_init=%d skip_bcr=%d)",
+		   qmp->skip_init, piano_skip_bcr);
+
 	/*
 	 * Toggle BCR reset for PHY that doesn't support no_csr reset or has not
 	 * been initialized.
 	 */
-	if (!qmp->skip_init) {
+	if (!qmp->skip_init && !piano_skip_bcr) {
 		ret = reset_control_bulk_assert(cfg->num_resets, qmp->resets);
 		if (ret) {
 			dev_err(qmp->dev, "reset assert failed\n");
@@ -4909,17 +4929,19 @@ static int qmp_pcie_init(struct phy *phy)
 
 	usleep_range(200, 300);
 
-	if (!qmp->skip_init) {
+	if (!qmp->skip_init && !piano_skip_bcr) {
 		ret = reset_control_bulk_deassert(cfg->num_resets, qmp->resets);
 		if (ret) {
 			dev_err(qmp->dev, "reset deassert failed\n");
 			goto err_assert_reset;
 		}
 	}
+	PIANO_MARK(qmp->dev, "Q2 phy reset stage done, enabling clocks");
 
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(qmp_pciephy_clk_l), qmp->clks);
 	if (ret)
 		goto err_assert_reset;
+	PIANO_MARK(qmp->dev, "Q3 phy clocks on");
 
 	return 0;
 
@@ -4976,11 +4998,13 @@ static int qmp_pcie_power_on(struct phy *phy)
 
 	qmp_pcie_init_registers(qmp, &cfg->tbls);
 	qmp_pcie_init_registers(qmp, mode_tbls);
+	PIANO_MARK(qmp->dev, "Q4 phy tables written");
 
 skip_tbls_init:
 	ret = clk_bulk_prepare_enable(qmp->num_pipe_clks, qmp->pipe_clks);
 	if (ret)
 		return ret;
+	PIANO_MARK(qmp->dev, "Q5 pipe clock on");
 
 	ret = reset_control_deassert(qmp->nocsr_reset);
 	if (ret) {
@@ -5003,12 +5027,15 @@ skip_tbls_init:
 skip_serdes_start:
 	status = pcs + cfg->regs[QPHY_PCS_STATUS];
 	mask = cfg->phy_status;
+	PIANO_MARK(qmp->dev, "Q6 serdes started, polling PHYSTATUS");
 	ret = readl_poll_timeout(status, val, !(val & mask), 200,
 				 PHY_INIT_COMPLETE_TIMEOUT);
 	if (ret) {
-		dev_err(qmp->dev, "phy initialization timed-out\n");
+		dev_err(qmp->dev, "phy initialization timed-out (status %08x)\n",
+			val);
 		goto err_disable_pipe_clk;
 	}
+	PIANO_MARK(qmp->dev, "Q7 PHY ready");
 
 	return 0;
 

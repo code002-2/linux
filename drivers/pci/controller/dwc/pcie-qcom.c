@@ -1037,6 +1037,40 @@ unmap_core:
 	return ret;
 }
 
+/*
+ * Piano bring-up only: a marker followed by a short sleep, so that the
+ * console (fbcon/ramoops) has flushed it before the next risky access.
+ */
+#define PIANO_MARK(dev, fmt, ...)					\
+	do {								\
+		dev_info(dev, "piano-dbg: " fmt "\n", ##__VA_ARGS__);	\
+		msleep(30);						\
+	} while (0)
+
+/*
+ * Downstream pci-msm clears PARF_CESTA_CLKREQ_SEL (qcom,pcie-clkreq-offset
+ * = 0x2c48 on sun) whenever it runs without CESTA: on this SoC CLKREQ# is
+ * routed to the PCIe CESTA state manager by default, which nobody drives
+ * here.  Do the same before the PHY is brought up.
+ */
+#define PARF_PIANO_CESTA_CONFIG		0x2c48
+#define PARF_PIANO_CESTA_CLKREQ_SEL	BIT(0)
+
+static void qcom_pcie_piano_clkreq_to_sw(struct qcom_pcie *pcie)
+{
+	struct device *dev = pcie->pci->dev;
+	u32 val;
+
+	if (!of_device_is_compatible(dev->of_node, "qcom,pcie-sm8750"))
+		return;
+
+	val = readl(pcie->parf + PARF_PIANO_CESTA_CONFIG);
+	writel(val & ~PARF_PIANO_CESTA_CLKREQ_SEL,
+	       pcie->parf + PARF_PIANO_CESTA_CONFIG);
+	PIANO_MARK(dev, "PARF CESTA config %08x -> %08x", val,
+		   readl(pcie->parf + PARF_PIANO_CESTA_CONFIG));
+}
+
 static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 {
 	struct qcom_pcie_resources_2_7_0 *res = &pcie->res.v2_7_0;
@@ -1127,8 +1161,8 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 	val = readl(pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT_V2);
 	val |= EN;
 	writel(val, pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT_V2);
-	dev_info(dev, "\n\npiano-dbg: === INIT 2.7.0 COMPLETE ===\n\n");
-	dev_info(dev, "piano-dbg: init PARF block done\n");
+	qcom_pcie_piano_clkreq_to_sw(pcie);
+	PIANO_MARK(dev, "init PARF block done");
 
 	return 0;
 err_disable_clocks:
@@ -1439,9 +1473,11 @@ static int qcom_pcie_host_init(struct dw_pcie_rp *pp)
 	if (ret)
 		return ret;
 
+	PIANO_MARK(pci->dev, "H1 phy power-on");
 	ret = qcom_pcie_phy_power_on(pcie);
 	if (ret)
 		goto err_deinit;
+	PIANO_MARK(pci->dev, "H2 phy up");
 
 	if (!pci->suspended) {
 		ret = pci_pwrctrl_create_devices(pci->dev);
@@ -1454,12 +1490,14 @@ static int qcom_pcie_host_init(struct dw_pcie_rp *pp)
 		if (ret)
 			goto err_pwrctrl_destroy;
 	}
+	PIANO_MARK(pci->dev, "H3 pwrctrl on");
 
 	if (pcie->cfg->ops->post_init) {
 		ret = pcie->cfg->ops->post_init(pcie);
 		if (ret)
 			goto err_pwrctrl_power_off;
 	}
+	PIANO_MARK(pci->dev, "H4 post_init done (first DBI access passed)");
 
 	qcom_pcie_clear_aspm_l0s(pcie->pci);
 	dw_pcie_remove_capability(pcie->pci, PCI_CAP_ID_MSIX);
@@ -1467,6 +1505,7 @@ static int qcom_pcie_host_init(struct dw_pcie_rp *pp)
 
 	qcom_pcie_configure_ports(pcie);
 
+	PIANO_MARK(pci->dev, "H5 PERST# deassert");
 	qcom_pcie_perst_deassert(pcie);
 
 	if (pcie->cfg->ops->config_sid) {
