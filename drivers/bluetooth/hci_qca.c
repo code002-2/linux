@@ -253,6 +253,15 @@ static enum qca_btsoc_type qca_soc_type(struct hci_uart *hu)
 	return soc_type;
 }
 
+/*
+ * Piano bring-up only: override the DT max-speed so that several UART
+ * operating speeds can be tried in one boot (modprobe hci_uart
+ * piano_speed=N).  0 keeps the DT value.
+ */
+static unsigned int piano_speed;
+module_param(piano_speed, uint, 0444);
+MODULE_PARM_DESC(piano_speed, "piano bring-up: QCA operating UART speed override");
+
 static const char *qca_get_firmware_name(struct hci_uart *hu)
 {
 	if (hu->serdev) {
@@ -2414,6 +2423,11 @@ static int qca_serdev_probe(struct serdev_device *serdev)
 					 qcadev->firmware_name, ARRAY_SIZE(qcadev->firmware_name));
 	device_property_read_u32(&serdev->dev, "max-speed",
 				 &qcadev->oper_speed);
+	if (piano_speed) {
+		dev_info(&serdev->dev, "piano-dbg: operating speed %u (DT %u)\n",
+			 piano_speed, qcadev->oper_speed);
+		qcadev->oper_speed = piano_speed;
+	}
 	if (!qcadev->oper_speed)
 		BT_DBG("UART will pick default operating speed");
 
