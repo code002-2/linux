@@ -1299,15 +1299,6 @@ static int geni_serial_set_rate(struct uart_port *uport, unsigned int baud)
 		return -EINVAL;
 	}
 
-	/* piano bring-up: dump the SE clock table the rate is chosen from */
-	{
-		unsigned long *tbl;
-		int i, n = geni_se_clk_tbl_get(&port->se, &tbl);
-
-		for (i = 0; i < n; i++)
-			dev_info(port->se.dev, "piano-dbg: se clk level %d: %lu\n",
-				 i, tbl[i]);
-	}
 	/* piano bring-up: show the real line rate the DFS table allows */
 	dev_info(port->se.dev, "piano-dbg: baud %u: desired %u, src %lu / %u -> %lu baud (sampling %u, idx %u)\n",
 		 baud, baud * sampling_rate, clk_rate, clk_div,

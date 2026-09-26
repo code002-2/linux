@@ -262,6 +262,11 @@ static unsigned int piano_speed;
 module_param(piano_speed, uint, 0444);
 MODULE_PARM_DESC(piano_speed, "piano bring-up: QCA operating UART speed override");
 
+/* Piano bring-up only: each failed setup retry costs ~30 s of timeouts. */
+static unsigned int piano_retries = MAX_INIT_RETRIES;
+module_param(piano_retries, uint, 0444);
+MODULE_PARM_DESC(piano_retries, "piano bring-up: setup power-cycle retries");
+
 static const char *qca_get_firmware_name(struct hci_uart *hu)
 {
 	if (hu->serdev) {
@@ -2066,7 +2071,7 @@ out:
 	if (ret) {
 		qca_power_off(hu);
 
-		if (retries < MAX_INIT_RETRIES) {
+		if (retries < piano_retries) {
 			bt_dev_warn(hdev, "Retry BT power ON:%d", retries);
 			if (hu->serdev) {
 				serdev_device_close(hu->serdev);
