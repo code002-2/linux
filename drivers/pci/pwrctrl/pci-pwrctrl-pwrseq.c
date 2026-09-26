@@ -122,6 +122,14 @@ static const struct of_device_id pwrseq_pwrctrl_of_match[] = {
 		.compatible = "pci17cb,1107",
 		.data = &pwrseq_pwrctrl_qcom_wcn_pdata,
 	},
+	{
+		/*
+		 * ATH12K in the WCN7850-family "peach" compute SKU found
+		 * on SM8750 tablets (Xiaomi Pad 8 Pro / piano).
+		 */
+		.compatible = "pci17cb,110e",
+		.data = &pwrseq_pwrctrl_qcom_wcn_pdata,
+	},
 	{ }
 };
 MODULE_DEVICE_TABLE(of, pwrseq_pwrctrl_of_match);
