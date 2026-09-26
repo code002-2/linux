@@ -1018,16 +1018,32 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 	dev_info(dev, "piano-dbg: init clocks on (%d)\n", res->num_clks);
 
 	/*
-	 * Round 13 bring-up experiment: the BCR cycle is SKIPPED.
-	 * Field rounds 11-12: the machine dies on the first PARF write right
-	 * after the deassert — theory: the boot-loader-left GDSC is ON, the
-	 * BCR cycle collapses the VOTABLE domain (sm8750 gcc_pcie_0_gdsc
-	 * uses collapse_ctrl 0x5214c) and the re-vote is ineffective,
-	 * leaving PARF inaccessible (AXI hang -> watchdog). Skipping the
-	 * cycle tests whether the pre-existing power state suffices.
+	 * Round 14: BCR cycle RESTORED (round 13 proved skipping it lets the
+	 * PARF writes through on the boot-left domain), now followed by a
+	 * forced genpd re-vote: put_noidle + get_sync makes the gdsc driver
+	 * re-write the collapse vote (0x5214c) and re-poll the GDSCR, so the
+	 * domain comes back powered with a properly reset core.
 	 */
-	dev_info(dev, "\n\npiano-dbg: === BCR CYCLE SKIPPED (experiment) ===\n\n");
-
+	dev_info(dev, "piano-dbg: asserting BCR\n");
+	ret = reset_control_assert(res->rst);
+	if (ret) {
+		dev_err(dev, "reset assert failed (%d)\n", ret);
+		goto err_disable_clocks;
+	}
+	usleep_range(1000, 1500);
+	ret = reset_control_deassert(res->rst);
+	if (ret) {
+		dev_err(dev, "reset deassert failed (%d)\n", ret);
+		goto err_disable_clocks;
+	}
+	dev_info(dev, "piano-dbg: BCR cycled, re-voting domain\n");
+	pm_runtime_put_noidle(dev);
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0) {
+		dev_err(dev, "domain re-vote failed (%d)\n", ret);
+		goto err_disable_clocks;
+	}
+	dev_info(dev, "\n\npiano-dbg: === DOMAIN RE-VOTED AFTER BCR ===\n\n");
 	usleep_range(1000, 1500);
 
 
