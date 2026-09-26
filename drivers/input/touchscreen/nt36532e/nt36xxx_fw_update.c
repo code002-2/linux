@@ -856,14 +856,22 @@ int32_t nvt_update_firmware(const char *firmware_name)
 		goto download_fail;
 	}
 
-	NVT_LOG("Update firmware success! <%ld us>\n",
-			(long) ktime_us_delta(end, start));
+	NVT_INFO("firmware %s downloaded in %ld us\n", firmware_name,
+		 (long) ktime_us_delta(end, start));
 	nvt_thp_mark_epoch();
+
+	/* THP firmware: the frame length is only known after the download */
+	if (nvt_get_xm_htc_poll_info())
+		NVT_ERR("THP poll info unavailable, frame length %u\n",
+			ts->thp_payload_len);
 
 	/* Get FW Info */
 	ret = nvt_get_fw_info();
 	if (ret) {
 		NVT_ERR("nvt_get_fw_info failed. (%d)\n", ret);
+	} else {
+		NVT_INFO("fw_ver=0x%02X, x_num=%u, y_num=%u, PID=0x%04X\n",
+			 ts->fw_ver, ts->x_num, ts->y_num, ts->nvt_pid);
 	}
 
 download_fail:
@@ -888,19 +896,21 @@ return:
 *******************************************************/
 void Boot_Update_Firmware(struct work_struct *work)
 {
+	int32_t ret;
+
 	mutex_lock(&ts->lock);
-	nvt_update_firmware(ts->fw_name);
-	nvt_get_fw_info();
-	//enable idle baseline update
-	nvt_set_custom_cmd(0x19, 0x00);
-	nvt_set_doze_delay(120);
-	//enter doze mode
-	nvt_set_custom_cmd(0x01, 0x02);
-	nvt_thp_restore_stylus();
-	//test
-	//nvt_set_custom_cmd(0x08, 0x01);
-	//nvt_set_custom_cmd(0x07, 0x00);
+	ret = nvt_update_firmware(ts->fw_name);
+	if (!ret)
+		nvt_thp_restore_stylus();
 	mutex_unlock(&ts->lock);
+
+	/* an IC without firmware has nothing to report */
+	if (ret) {
+		NVT_ERR("boot firmware update failed (%d), IRQ left off\n", ret);
+		return;
+	}
+
+	nvt_irq_enable(true);
 	nvt_power_supply_restore();
 }
 #endif /* BOOT_UPDATE_FIRMWARE */

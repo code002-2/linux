@@ -63,6 +63,7 @@ struct proc_dir_entry;
 #define NVT_LOG(fmt, args...)    pr_debug("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
 #endif
 #define NVT_ERR(fmt, args...)    pr_err("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
+#define NVT_INFO(fmt, args...)   pr_info("[%s] " fmt, NVT_SPI_NAME, ##args)
 
 //---Touch info.---
 #define TOUCH_DEFAULT_NUM_X 60
@@ -106,6 +107,8 @@ struct nvt_ts_data {
 	struct drm_panel_follower panel_follower;
 #endif
 	const char *fw_name;
+	struct gpio_desc *lcd_id_gpiod;
+	int lcd_id;
 	uint8_t fw_ver;
 	uint8_t x_num;
 	uint8_t y_num;
@@ -150,6 +153,8 @@ struct nvt_ts_data {
 	u64 thp_read_errors;
 	u64 thp_header_errors;
 	u64 thp_stream_drops;
+	u64 thp_irq_count;
+	u16 thp_payload_len;
 	u16 thp_header_crc;
 	u32 thp_magic;
 	ktime_t thp_timestamp;
@@ -160,6 +165,7 @@ struct nvt_ts_data {
 	struct proc_dir_entry *thp_stream_proc;
 	struct proc_dir_entry *thp_status_proc;
 	struct proc_dir_entry *thp_stylus_proc;
+	struct proc_dir_entry *thp_cmd_proc;
 };
 
 typedef enum {
@@ -196,6 +202,7 @@ typedef enum {
 extern struct nvt_ts_data *ts;
 
 //---extern functions---
+void nvt_irq_enable(bool enable);
 int32_t CTP_SPI_READ(struct spi_device *client, uint8_t *buf, uint16_t len);
 int32_t CTP_SPI_WRITE(struct spi_device *client, uint8_t *buf, uint16_t len);
 void nvt_bootloader_reset(void);
@@ -210,6 +217,7 @@ int32_t nvt_update_firmware(const char *firmware_name);
 void nvt_thp_mark_epoch(void);
 int32_t nvt_check_fw_reset_state(RST_COMPLETE_STATE check_reset_state);
 int32_t nvt_get_fw_info(void);
+int32_t nvt_get_xm_htc_poll_info(void);
 int32_t nvt_clear_fw_status(void);
 int32_t nvt_check_fw_status(void);
 int32_t nvt_set_page(uint32_t addr);

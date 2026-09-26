@@ -591,15 +591,37 @@ static const struct rproc_ops qcom_pas_minidump_ops = {
 
 static int qcom_pas_init_clock(struct qcom_pas *pas)
 {
-	pas->xo = devm_clk_get(pas->dev, "xo");
-	if (IS_ERR(pas->xo))
-		return dev_err_probe(pas->dev, PTR_ERR(pas->xo),
-				     "failed to get xo clock");
+	/*
+	 * piano: the stock sun vendor tree wires adsp/cdsp "xo" (and often
+	 * "aggre2") to clock providers mainline does not bind.  The node DOES
+	 * list the clock, so the lookup returns -EPROBE_DEFER rather than
+	 * -ENOENT and devm_clk_get_optional() alone does not help.  Deferring
+	 * here is fatal to the whole bring-up: the remoteproc never probes, so
+	 * pmic-glink, battmgr and the ADSP audio chain never come up either.
+	 * clk_prepare_enable() and clk_disable_unprepare() are NULL-safe, so
+	 * continue without the clock and let the firmware load proceed.
+	 */
+	pas->xo = devm_clk_get_optional(pas->dev, "xo");
+	if (IS_ERR(pas->xo)) {
+		if (PTR_ERR(pas->xo) == -EPROBE_DEFER) {
+			dev_warn(pas->dev, "xo clock provider unbound, continuing without it\n");
+			pas->xo = NULL;
+		} else {
+			return dev_err_probe(pas->dev, PTR_ERR(pas->xo),
+					     "failed to get xo clock");
+		}
+	}
 
 	pas->aggre2_clk = devm_clk_get_optional(pas->dev, "aggre2");
-	if (IS_ERR(pas->aggre2_clk))
-		return dev_err_probe(pas->dev, PTR_ERR(pas->aggre2_clk),
-				     "failed to get aggre2 clock");
+	if (IS_ERR(pas->aggre2_clk)) {
+		if (PTR_ERR(pas->aggre2_clk) == -EPROBE_DEFER) {
+			dev_warn(pas->dev, "aggre2 clock provider unbound, continuing without it\n");
+			pas->aggre2_clk = NULL;
+		} else {
+			return dev_err_probe(pas->dev, PTR_ERR(pas->aggre2_clk),
+					     "failed to get aggre2 clock");
+		}
+	}
 
 	return 0;
 }
@@ -608,10 +630,24 @@ static int qcom_pas_init_regulator(struct qcom_pas *pas)
 {
 	pas->cx_supply = devm_regulator_get_optional(pas->dev, "cx");
 	if (IS_ERR(pas->cx_supply)) {
-		if (PTR_ERR(pas->cx_supply) == -ENODEV)
+		/*
+		 * piano bring-up: the stock vendor remoteproc nodes carry
+		 * cx-supply/mx-supply phandles pointing at downstream
+		 * rpmh-arc-regulator nodes that no mainline driver binds, so
+		 * the lookup returns -EPROBE_DEFER forever.  Voltage/rail
+		 * voting is done through the power-domains path instead, so
+		 * degrade to "no supply" the same way the dwc3-qcom and
+		 * qcom_q6v5 icc paths do on this branch.
+		 */
+		if (PTR_ERR(pas->cx_supply) == -ENODEV ||
+		    PTR_ERR(pas->cx_supply) == -EPROBE_DEFER) {
+			if (PTR_ERR(pas->cx_supply) == -EPROBE_DEFER)
+				dev_warn(pas->dev,
+					 "cx supply unresolved, ignoring (power-domains used instead)\n");
 			pas->cx_supply = NULL;
-		else
+		} else {
 			return PTR_ERR(pas->cx_supply);
+		}
 	}
 
 	if (pas->cx_supply)
@@ -619,10 +655,17 @@ static int qcom_pas_init_regulator(struct qcom_pas *pas)
 
 	pas->px_supply = devm_regulator_get_optional(pas->dev, "px");
 	if (IS_ERR(pas->px_supply)) {
-		if (PTR_ERR(pas->px_supply) == -ENODEV)
+		/* piano: see the cx comment above — vendor px/mx supplies point at
+		 * unbound downstream rpmh-arc-regulator nodes. */
+		if (PTR_ERR(pas->px_supply) == -ENODEV ||
+		    PTR_ERR(pas->px_supply) == -EPROBE_DEFER) {
+			if (PTR_ERR(pas->px_supply) == -EPROBE_DEFER)
+				dev_warn(pas->dev,
+					 "px supply unresolved, ignoring (power-domains used instead)\n");
 			pas->px_supply = NULL;
-		else
+		} else {
 			return PTR_ERR(pas->px_supply);
+		}
 	}
 
 	return 0;
@@ -761,8 +804,17 @@ static int qcom_pas_assign_memory_region(struct qcom_pas *pas)
 					  &pas->region_assign_owners[offset],
 					  perm, perm_size);
 		if (ret < 0) {
-			dev_err(pas->dev, "assign memory %d failed\n", offset);
-			return ret;
+			/*
+			 * piano: the stock vendor reserved-memory layout indexes
+			 * differently from mainline's expectation.  Losing the
+			 * SCM share on one region must not keep the whole
+			 * remoteproc (and with it pmic-glink/battmgr) down.
+			 */
+			dev_warn(pas->dev, "assign memory %d failed: %d (continuing)\n",
+				 offset, ret);
+			pas->region_assign_phys[offset] = 0;
+			pas->region_assign_size[offset] = 0;
+			continue;
 		}
 	}
 
@@ -832,7 +884,14 @@ static int qcom_pas_probe(struct platform_device *pdev)
 	}
 
 	rproc->has_iommu = of_property_present(pdev->dev.of_node, "iommus");
-	rproc->auto_boot = desc->auto_boot;
+	/*
+	 * Some vendor firmware revisions touch shared PMIC/display resources
+	 * during ADSP handover.  Let the device tree opt out of the descriptor's
+	 * historical auto-boot default so bring-up can probe the remoteproc and
+	 * inspect its state before starting firmware.
+	 */
+	rproc->auto_boot = desc->auto_boot &&
+		!of_property_read_bool(pdev->dev.of_node, "qcom,no-auto-boot");
 	rproc_coredump_set_elf_info(rproc, ELFCLASS32, EM_NONE);
 
 	pas = rproc->priv;
@@ -1637,6 +1696,47 @@ static const struct qcom_pas_data sm8750_mpss_resource = {
 	.region_assign_vmid = QCOM_SCM_VMID_MSS_MSA,
 };
 
+static const struct qcom_pas_data sm8750_adsp_resource = {
+	.crash_reason_smem = 423,
+	.firmware_name = "adsp.mdt",
+	.dtb_firmware_name = "adsp_dtb.mdt",
+	.pas_id = 1,
+	.dtb_pas_id = 0x24,
+	.minidump_id = 5,
+	.auto_boot = true,
+	.proxy_pd_names = (char*[]){
+		"lcx",
+		"lmx",
+		NULL
+	},
+	.load_state = "adsp",
+	.ssr_name = "lpass",
+	.sysmon_name = "adsp",
+	.ssctl_id = 0x14,
+	.smem_host_id = 2,
+};
+
+static const struct qcom_pas_data sm8750_cdsp_resource = {
+	.crash_reason_smem = 601,
+	.firmware_name = "cdsp.mdt",
+	.dtb_firmware_name = "cdsp_dtb.mdt",
+	.pas_id = 18,
+	.dtb_pas_id = 0x25,
+	.minidump_id = 7,
+	.auto_boot = true,
+	.proxy_pd_names = (char*[]){
+		"cx",
+		"mxc",
+		"nsp",
+		NULL
+	},
+	.load_state = "cdsp",
+	.ssr_name = "cdsp",
+	.sysmon_name = "cdsp",
+	.ssctl_id = 0x17,
+	.smem_host_id = 5,
+};
+
 static const struct of_device_id qcom_pas_of_match[] = {
 	{ .compatible = "qcom,eliza-adsp-pas", .data = &sm8550_adsp_resource },
 	{ .compatible = "qcom,milos-adsp-pas", .data = &sm8550_adsp_resource },
@@ -1712,6 +1812,12 @@ static const struct of_device_id qcom_pas_of_match[] = {
 	{ .compatible = "qcom,sm8650-cdsp-pas", .data = &sm8650_cdsp_resource },
 	{ .compatible = "qcom,sm8650-mpss-pas", .data = &sm8650_mpss_resource },
 	{ .compatible = "qcom,sm8750-mpss-pas", .data = &sm8750_mpss_resource },
+	/* piano: the stock sun vendor tree names these qcom,sun-*-pas; accept
+	 * both spellings so the mainline driver can bind the vendor nodes. */
+	{ .compatible = "qcom,sm8750-adsp-pas", .data = &sm8750_adsp_resource },
+	{ .compatible = "qcom,sm8750-cdsp-pas", .data = &sm8750_cdsp_resource },
+	{ .compatible = "qcom,sun-adsp-pas", .data = &sm8750_adsp_resource },
+	{ .compatible = "qcom,sun-cdsp-pas", .data = &sm8750_cdsp_resource },
 	{ .compatible = "qcom,x1e80100-adsp-pas", .data = &x1e80100_adsp_resource },
 	{ .compatible = "qcom,x1e80100-cdsp-pas", .data = &x1e80100_cdsp_resource },
 	{ },

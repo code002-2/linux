@@ -35,8 +35,9 @@ properties:
   novatek,lcd-id-gpios:
     maxItems: 1
     description: |
-      Panel-family identification GPIO carried from the stock DTBO.
-      Not consumed by the current driver; kept for board documentation.
+      Panel vendor identification input, read once at probe. Its level
+      selects the entry of firmware-name to download (Xiaomi piano:
+      0 = CSOT panel, 1 = BOE panel).
 
   novatek,spi-rd-fast-addr:
     $ref: /schemas/types.yaml#/definitions/uint32
@@ -45,10 +46,13 @@ properties:
       bootloader reset. Optional; fast-read stays enabled when absent.
 
   firmware-name:
-    $ref: /schemas/types.yaml#/definitions/string
+    $ref: /schemas/types.yaml#/definitions/string-array
+    minItems: 1
+    maxItems: 2
     description: |
-      Name of the firmware blob downloaded at boot. No firmware is
-      requested when this property is absent.
+      Firmware blob(s) downloaded at boot. With two entries the level of
+      novatek,lcd-id-gpios selects one. No firmware is requested when this
+      property is absent.
 
   pinctrl-0: true
   pinctrl-1: true
@@ -59,7 +63,8 @@ properties:
     description: |
       Phandle to the DRM panel this touch controller follows. When present,
       the driver registers as a DRM panel follower and defers probe until
-      the panel is prepared.
+      the panel is prepared. When absent, the panel is assumed to be powered
+      by the bootloader (e.g. continuous splash on a simple framebuffer).
 
 required:
   - compatible
@@ -78,9 +83,12 @@ examples:
 
         touchscreen@0 {
             compatible = "novatek,NVT-ts-spi";
+            reg = <0>;
             spi-max-frequency = <19200000>;
             novatek,irq-gpios = <&tlmm 162 GPIO_ACTIVE_HIGH>;
-            firmware-name = "novatek/novatek_nt36532_piano_fw_csot.bin";
+            novatek,lcd-id-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+            firmware-name = "novatek/novatek_nt36532_piano_fw_csot.bin",
+                            "novatek/novatek_nt36532_piano_fw_boe.bin";
         };
     };
 ...

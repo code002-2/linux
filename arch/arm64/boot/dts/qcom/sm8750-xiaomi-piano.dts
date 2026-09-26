@@ -1244,12 +1244,12 @@
 		pinctrl-names = "pmx_ts_active", "pmx_ts_suspend";	/* (R) */
 
 		/*
-		 * CSOT-family firmware default (dual-panel OQ#15); the BOE
-		 * variant must be chosen from the real panel ID before any
-		 * device flash use. The blob itself never enters git — it
-		 * is consumed by the firmware deb from local/.
+		 * One THP firmware per panel vendor, indexed by the lcd-id
+		 * level like the stock p81 driver (0 = CSOT, 1 = BOE). The
+		 * blobs never enter git — they come from local/.
 		 */
-		firmware-name = "novatek/novatek_nt36532_piano_fw_csot.bin";
+		firmware-name = "novatek/novatek_nt36532_piano_fw_csot.bin",
+				"novatek/novatek_nt36532_piano_fw_boe.bin";
 
 		/*
 		 * Integrated bring-up: the DSI panel is on this branch, so the

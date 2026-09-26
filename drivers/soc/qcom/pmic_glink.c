@@ -407,6 +407,8 @@ static const struct of_device_id pmic_glink_of_match[] = {
 	{ .compatible = "qcom,glymur-pmic-glink", .data = &pmic_glink_soccp_data },
 	{ .compatible = "qcom,kaanapali-pmic-glink", .data = &pmic_glink_soccp_data },
 	{ .compatible = "qcom,pmic-glink", .data = &pmic_glink_adsp_data },
+	/* piano: the stock vendor node uses qcom,qti-pmic-glink */
+	{ .compatible = "qcom,qti-pmic-glink", .data = &pmic_glink_adsp_data },
 	{}
 };
 MODULE_DEVICE_TABLE(of, pmic_glink_of_match);

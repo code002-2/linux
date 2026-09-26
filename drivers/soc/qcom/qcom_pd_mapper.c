@@ -627,6 +627,16 @@ static const struct of_device_id qcom_pdm_domains[] __maybe_unused = {
 	{ .compatible = "qcom,sm8750", .data = sm8550_domains, },
 	{ .compatible = "qcom,x1e80100", .data = x1e80100_domains, },
 	{ .compatible = "qcom,x1p42100", .data = x1e80100_domains, },
+	/*
+	 * piano: the stock sun/sunp device tree keeps Xiaomi's marketing
+	 * codename as the machine compatible, so the upstream sm8750 entry
+	 * never matches and pd-mapper fails with -ENODEV ("no support for
+	 * the platform").  Without it the ADSP charger protection domain is
+	 * never served, pmic-glink never reaches SERVREG up, and the
+	 * battery reads time out forever.
+	 */
+	{ .compatible = "qcom,sun", .data = sm8550_domains, },
+	{ .compatible = "qcom,sunp", .data = sm8550_domains, },
 	{},
 };
 

@@ -66,6 +66,13 @@ properties:
       - description: Firmware name of the Hexagon core
       - description: Firmware name of the Hexagon Devicetree
 
+  qcom,no-auto-boot:
+    type: boolean
+    description:
+      Do not start the remote processor automatically when the PAS driver
+      probes.  This is intended for controlled bring-up of vendor firmware
+      whose handover may affect shared board resources.
+
   memory-region:
     minItems: 2
     items:

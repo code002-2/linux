@@ -347,10 +347,24 @@ int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
 		return load_state ? -ENOMEM : -EINVAL;
 	}
 
+	/*
+	 * piano: the stock sun vendor tree names an interconnect path whose
+	 * provider mainline does not bind, so devm_of_icc_get() returns
+	 * -EPROBE_DEFER and the whole remoteproc parks forever.  Deferring
+	 * here costs more than the path is worth: without the remoteproc there
+	 * is no ADSP, hence no pmic-glink, hence no battery or audio.  All
+	 * consumers (icc_set_bw) are NULL-safe, so continue without the path.
+	 */
 	q6v5->path = devm_of_icc_get(&pdev->dev, NULL);
-	if (IS_ERR(q6v5->path))
-		return dev_err_probe(&pdev->dev, PTR_ERR(q6v5->path),
-				     "failed to acquire interconnect path\n");
+	if (IS_ERR(q6v5->path)) {
+		if (PTR_ERR(q6v5->path) == -EPROBE_DEFER) {
+			dev_warn(&pdev->dev, "interconnect provider unbound, continuing without it\n");
+			q6v5->path = NULL;
+		} else {
+			return dev_err_probe(&pdev->dev, PTR_ERR(q6v5->path),
+					     "failed to acquire interconnect path\n");
+		}
+	}
 
 	return 0;
 }

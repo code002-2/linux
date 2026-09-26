@@ -39,8 +39,8 @@
 
 static int32_t nvt_ts_suspend(struct device *dev);
 static int32_t nvt_ts_resume(struct device *dev);
-static void nvt_irq_enable(bool enable);
 struct nvt_ts_data *ts;
+static uint8_t bTouchIsAwake;
 
 #if BOOT_UPDATE_FIRMWARE
 static struct workqueue_struct *nvt_fwu_wq;
@@ -51,8 +51,12 @@ extern void Boot_Update_Firmware(struct work_struct *work);
 static struct drm_panel_follower_funcs nt36xxx_panel_follower_funcs;
 #endif
 #define NVT_THP_HEADER_LEN 257
-#define NVT_THP_PAYLOAD_LEN 5160
-#define NVT_THP_FRAME_LEN (NVT_THP_HEADER_LEN + NVT_THP_PAYLOAD_LEN)
+/* sheng payload length, used when the firmware has no polling info */
+#define NVT_THP_DEFAULT_PAYLOAD_LEN 5160
+/* one SPI read must fit rbuf together with the dummy byte */
+#define NVT_THP_MAX_PAYLOAD_LEN (NVT_READ_LEN - NVT_THP_HEADER_LEN - DUMMY_BYTES)
+#define NVT_THP_MAX_FRAME_LEN (NVT_THP_HEADER_LEN + NVT_THP_MAX_PAYLOAD_LEN)
+#define NVT_THP_POLL_INFO_LEN 39
 #define NVT_THP_STREAM_SIZE (4 * 1024 * 1024)
 #define NVT_THP_STREAM_MAGIC 0x3150544e
 #define NVT_THP_STREAM_FLAG_VALID BIT(0)
@@ -83,6 +87,11 @@ static bool nvt_thp_header_valid(const u8 *frame, u16 *header_crc,
 	return crc_inv == (u16)~crc && marker_inv == ~marker;
 }
 
+static u16 nvt_thp_frame_len(void)
+{
+	return NVT_THP_HEADER_LEN + ts->thp_payload_len;
+}
+
 static int nvt_thp_read_frame(u8 *fw_state)
 {
 	int ret;
@@ -90,7 +99,7 @@ static int nvt_thp_read_frame(u8 *fw_state)
 	mutex_lock(&ts->thp_lock);
 	nvt_set_page(ts->mmap->EVENT_BUF_ADDR);
 	ts->thp_frame[0] = 0;
-	ret = CTP_SPI_READ(ts->client, ts->thp_frame, NVT_THP_FRAME_LEN);
+	ret = CTP_SPI_READ(ts->client, ts->thp_frame, nvt_thp_frame_len());
 	if (ret < 0)
 		ts->thp_read_errors++;
 	else {
@@ -105,7 +114,8 @@ static int nvt_thp_read_frame(u8 *fw_state)
 static void nvt_thp_publish_frame(void)
 {
 	struct nvt_thp_stream_header header;
-	size_t record_len = sizeof(header) + NVT_THP_FRAME_LEN;
+	u16 frame_len = nvt_thp_frame_len();
+	size_t record_len = sizeof(header) + frame_len;
 	u16 header_crc;
 	u32 magic;
 	bool valid;
@@ -125,7 +135,7 @@ static void nvt_thp_publish_frame(void)
 
 	header.magic = cpu_to_le32(NVT_THP_STREAM_MAGIC);
 	header.header_len = cpu_to_le16(sizeof(header));
-	header.frame_len = cpu_to_le16(NVT_THP_FRAME_LEN);
+	header.frame_len = cpu_to_le16(frame_len);
 	header.sequence = cpu_to_le64(ts->thp_frame_count);
 	header.timestamp_ns = cpu_to_le64(ktime_to_ns(ts->thp_timestamp));
 	header.header_crc = cpu_to_le16(header_crc);
@@ -133,12 +143,13 @@ static void nvt_thp_publish_frame(void)
 				       (epoch ? NVT_THP_STREAM_FLAG_EPOCH : 0));
 	header.firmware_magic = cpu_to_le32(magic);
 
-	if (kfifo_avail(&ts->thp_stream_fifo) < record_len) {
+	if (!ts->thp_capture_enabled) {
+		/* statistics only */
+	} else if (kfifo_avail(&ts->thp_stream_fifo) < record_len) {
 		ts->thp_stream_drops++;
 	} else {
 		kfifo_in(&ts->thp_stream_fifo, &header, sizeof(header));
-		kfifo_in(&ts->thp_stream_fifo, ts->thp_frame,
-			 NVT_THP_FRAME_LEN);
+		kfifo_in(&ts->thp_stream_fifo, ts->thp_frame, frame_len);
 	}
 	mutex_unlock(&ts->thp_lock);
 	wake_up_interruptible(&ts->thp_stream_wait);
@@ -268,6 +279,44 @@ static ssize_t nvt_thp_stylus_write(struct file *file,
 	return count;
 }
 
+/*
+ * Send one Xiaomi extended host command (0x50 0xBF <cmd> 0 <value>) for
+ * bring-up experiments: "echo '<cmd> <value>' > /proc/nvt_thp_cmd".
+ */
+static ssize_t nvt_thp_cmd_write(struct file *file, const char __user *buf,
+				 size_t count, loff_t *ppos)
+{
+	bool irq_was_enabled;
+	char kbuf[32];
+	unsigned int cmd, value;
+	int ret;
+
+	if (!ts)
+		return -ENODEV;
+	if (count >= sizeof(kbuf))
+		return -EINVAL;
+	if (copy_from_user(kbuf, buf, count))
+		return -EFAULT;
+	kbuf[count] = '\0';
+	if (sscanf(kbuf, "%i %i", &cmd, &value) != 2 || cmd > 0xff ||
+	    value > 0xffff)
+		return -EINVAL;
+	if (!READ_ONCE(bTouchIsAwake))
+		return -EAGAIN;
+
+	irq_was_enabled = READ_ONCE(ts->irq_enabled);
+	if (irq_was_enabled)
+		nvt_irq_enable(false);
+	mutex_lock(&ts->lock);
+	ret = nvt_set_custom_cmd(cmd, value);
+	mutex_unlock(&ts->lock);
+	if (irq_was_enabled)
+		nvt_irq_enable(true);
+
+	NVT_INFO("custom cmd 0x%02x value 0x%04x: %d\n", cmd, value, ret);
+	return ret ? -EIO : count;
+}
+
 int nvt_thp_restore_stylus(void)
 {
 	u8 mode;
@@ -344,12 +393,20 @@ static int nvt_thp_status_show(struct seq_file *m, void *v)
 	mutex_lock(&ts->thp_lock);
 	seq_printf(m, "enabled: %u\n", ts->thp_capture_enabled);
 	seq_printf(m, "event_buffer: 0x%06x\n", ts->mmap->EVENT_BUF_ADDR);
-	seq_printf(m, "firmware: %s\n", ts->fw_name);
+	seq_printf(m, "firmware: %s\n", ts->fw_name ? ts->fw_name : "(none)");
+	seq_printf(m, "lcd_id: %d\n", ts->lcd_id);
+	seq_printf(m, "fw_ver: 0x%02x\n", ts->fw_ver);
+	seq_printf(m, "fw_pid: 0x%04x\n", ts->nvt_pid);
+	seq_printf(m, "sensor_x: %u\n", ts->x_num);
+	seq_printf(m, "sensor_y: %u\n", ts->y_num);
+	seq_printf(m, "irq_enabled: %u\n", ts->irq_enabled);
+	seq_printf(m, "irqs: %llu\n", (unsigned long long)ts->thp_irq_count);
 	seq_printf(m, "stylus_enabled: %u\n", ts->thp_stylus_mode != 0);
 	seq_printf(m, "stylus_mode: %u\n", ts->thp_stylus_mode);
 	seq_puts(m, "kernel_input: disabled\n");
-	seq_printf(m, "raw_frame_length: %u\n", NVT_THP_FRAME_LEN);
-	seq_printf(m, "stream_frame_length: %u\n", NVT_THP_FRAME_LEN);
+	seq_printf(m, "payload_length: %u\n", ts->thp_payload_len);
+	seq_printf(m, "raw_frame_length: %u\n", nvt_thp_frame_len());
+	seq_printf(m, "stream_frame_length: %u\n", nvt_thp_frame_len());
 	seq_printf(m, "frames: %llu\n",
 		   (unsigned long long)ts->thp_frame_count);
 	seq_printf(m, "epochs: %llu\n",
@@ -394,6 +451,11 @@ static const struct proc_ops nvt_thp_stylus_ops = {
 	.proc_lseek = default_llseek,
 };
 
+static const struct proc_ops nvt_thp_cmd_ops = {
+	.proc_write = nvt_thp_cmd_write,
+	.proc_lseek = noop_llseek,
+};
+
 static const struct proc_ops nvt_thp_status_ops = {
 	.proc_open = nvt_thp_status_open,
 	.proc_read = seq_read,
@@ -403,8 +465,6 @@ static const struct proc_ops nvt_thp_status_ops = {
 
 uint32_t ENG_RST_ADDR  = 0x7FFF80;
 uint32_t SPI_RD_FAST_ADDR;	//read from dtsi
-
-static uint8_t bTouchIsAwake;
 
 static void nvt_power_supply_work(struct work_struct *work)
 {
@@ -424,7 +484,12 @@ static void nvt_power_supply_work(struct work_struct *work)
 
 	ts_core->power_supply_status = supplied;
 	command[1] = supplied ? 0x53 : 0x51;
-	ret = CTP_SPI_WRITE(ts_core->client, command, sizeof(command));
+	/* the host command byte lives in the event buffer page */
+	mutex_lock(&ts_core->lock);
+	ret = nvt_set_page(ts_core->mmap->EVENT_BUF_ADDR | EVENT_MAP_HOST_CMD);
+	if (!ret)
+		ret = CTP_SPI_WRITE(ts_core->client, command, sizeof(command));
+	mutex_unlock(&ts_core->lock);
 	if (ret)
 		NVT_ERR("USB status set failed, ret=%d\n", ret);
 	else
@@ -462,7 +527,7 @@ Description:
 return:
 	n.a.
 *******************************************************/
-static void nvt_irq_enable(bool enable)
+void nvt_irq_enable(bool enable)
 {
 	if (enable) {
 		if (!ts->irq_enabled) {
@@ -1097,6 +1162,48 @@ out:
 	return ret;
 }
 
+/*
+ * Read the Xiaomi host touch computing polling info published by the THP
+ * firmware after boot; bytes 2..3 hold the frame length that follows the
+ * 256-byte event buffer (MiCode p81 nvt_get_xm_htc_poll_info()).
+ */
+int32_t nvt_get_xm_htc_poll_info(void)
+{
+	uint8_t buf[NVT_THP_POLL_INFO_LEN + 1 + DUMMY_BYTES] = {0};
+	uint32_t addr = ts->mmap->XM_HTC_POLL_INFO_ADDR;
+	uint16_t frame_len;
+	int32_t ret;
+
+	if (!addr) {
+		ts->thp_payload_len = NVT_THP_DEFAULT_PAYLOAD_LEN;
+		return 0;
+	}
+
+	nvt_set_page(addr);
+	buf[0] = addr & 0x7F;
+	ret = CTP_SPI_READ(ts->client, buf, NVT_THP_POLL_INFO_LEN + 1);
+	nvt_set_page(ts->mmap->EVENT_BUF_ADDR);
+	if (ret) {
+		NVT_ERR("poll info read failed (%d)\n", ret);
+		return ret;
+	}
+
+	NVT_INFO("poll info: %*ph\n", NVT_THP_POLL_INFO_LEN, buf + 1);
+	frame_len = get_unaligned_le16(buf + 1 + 2);
+	if (!frame_len || frame_len > NVT_THP_MAX_PAYLOAD_LEN) {
+		NVT_ERR("poll info frame length %u out of range, keep %u\n",
+			frame_len, ts->thp_payload_len);
+		return -ERANGE;
+	}
+
+	mutex_lock(&ts->thp_lock);
+	ts->thp_payload_len = frame_len;
+	mutex_unlock(&ts->thp_lock);
+	NVT_INFO("THP frame length %u\n", frame_len);
+
+	return 0;
+}
+
 int nvt_set_custom_cmd(u8 cmd, u16 value)
 {
 	u8 buf[6] = {0};
@@ -1181,6 +1288,61 @@ return:
 	n.a.
 *******************************************************/
 #ifdef CONFIG_OF
+/*
+ * piano ships one THP firmware per panel vendor. The stock driver reads the
+ * panel ID pin once at probe (0 = CSOT, 1 = BOE) and picks the matching
+ * blob; here the blobs are listed in firmware-name in that pin order.
+ * Without firmware-name no firmware is requested and every download path
+ * degrades safely (update_firmware_request() returns -ENOENT for NULL).
+ */
+static int32_t nvt_select_firmware(struct device *dev)
+{
+	struct device_node *np = dev->of_node;
+	int count, index = 0;
+	int ret;
+
+	ts->lcd_id = -1;
+	ts->fw_name = NULL;
+
+	ts->lcd_id_gpiod = devm_gpiod_get_optional(dev, "novatek,lcd-id",
+						   GPIOD_IN);
+	if (IS_ERR(ts->lcd_id_gpiod))
+		return dev_err_probe(dev, PTR_ERR(ts->lcd_id_gpiod),
+				     "failed to get lcd-id GPIO\n");
+	if (ts->lcd_id_gpiod) {
+		ret = gpiod_get_value_cansleep(ts->lcd_id_gpiod);
+		if (ret < 0)
+			return dev_err_probe(dev, ret, "failed to read lcd-id\n");
+		ts->lcd_id = ret;
+	}
+
+	count = of_property_count_strings(np, "firmware-name");
+	if (count <= 0) {
+		NVT_ERR("firmware-name not set, firmware download disabled\n");
+		return 0;
+	}
+
+	if (count > 1) {
+		if (ts->lcd_id < 0) {
+			dev_err(dev, "several firmware names but no lcd-id GPIO\n");
+			return -EINVAL;
+		}
+		index = ts->lcd_id;
+		if (index >= count) {
+			dev_err(dev, "no firmware for lcd-id %d\n", index);
+			return -EINVAL;
+		}
+	}
+
+	ret = of_property_read_string_index(np, "firmware-name", index,
+					    &ts->fw_name);
+	if (ret)
+		return ret;
+
+	NVT_INFO("lcd-id %d, firmware %s\n", ts->lcd_id, ts->fw_name);
+	return 0;
+}
+
 static int32_t nvt_parse_dt(struct device *dev)
 {
 	struct device_node *np = dev->of_node;
@@ -1203,21 +1365,7 @@ static int32_t nvt_parse_dt(struct device *dev)
 		NVT_LOG("SPI_RD_FAST_ADDR=0x%06X\n", SPI_RD_FAST_ADDR);
 	}
 
-	/*
-	 * piano: firmware-name is optional. When absent, no firmware is
-	 * requested: fw_name stays NULL and every firmware path degrades
-	 * safely (update_firmware_request() returns -ENOENT for NULL).
-	 * The sheng default "novatek/nt36532e.bin" is deliberately not
-	 * reused — it does not exist for piano.
-	 */
-	ret = of_property_read_string(np, "firmware-name", &ts->fw_name);
-	if (ret) {
-		NVT_ERR("firmware-name not set, firmware download disabled\n");
-		ts->fw_name = NULL;
-		ret = 0;
-	}
-
-	return ret;
+	return nvt_select_firmware(dev);
 }
 #else
 static int32_t nvt_parse_dt(struct device *dev)
@@ -1357,6 +1505,7 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 	bool frame_captured = false;
 
 	mutex_lock(&ts->lock);
+	ts->thp_irq_count++;
 
 	if (ts->dev_pm_suspend) {
 		ret = wait_for_completion_timeout(&ts->dev_pm_suspend_completion, msecs_to_jiffies(500));
@@ -1366,14 +1515,12 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 		}
 	}
 
-	if (READ_ONCE(ts->thp_capture_enabled)) {
-		ret = nvt_thp_read_frame(fw_state);
-		frame_captured = ret >= 0;
-	} else {
-		nvt_set_page(ts->mmap->EVENT_BUF_ADDR);
-		fw_state[0] = 0;
-		ret = CTP_SPI_READ(ts->client, fw_state, sizeof(fw_state));
-	}
+	/*
+	 * Like the stock p81 THP driver, always fetch the whole frame the IC
+	 * announced; it is only queued for userspace while capture is on.
+	 */
+	ret = nvt_thp_read_frame(fw_state);
+	frame_captured = ret >= 0;
 	if (ret < 0) {
 		NVT_ERR("CTP_SPI_READ failed.(%d)\n", ret);
 		goto XFER_ERROR;
@@ -1388,11 +1535,6 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 		nvt_read_fw_history(ts->mmap->MMAP_HISTORY_EVENT0);
 		nvt_read_fw_history(ts->mmap->MMAP_HISTORY_EVENT1);
 		nvt_update_firmware(ts->fw_name);
-		//enable idle baseline update
-		nvt_set_custom_cmd(0x19, 0x00);
-		nvt_set_doze_delay(120);
-		//enter doze mode
-		nvt_set_custom_cmd(0x01, 0x02);
 		nvt_thp_restore_stylus();
 		nvt_power_supply_restore();
 		goto XFER_ERROR;
@@ -1466,6 +1608,9 @@ static int32_t nvt_ts_check_chip_ver_trim(struct nvt_ts_hw_reg_addr_info hw_regs
 		CTP_SPI_READ(ts->client, buf, 7);
 		NVT_LOG("buf[1]=0x%02X, buf[2]=0x%02X, buf[3]=0x%02X, buf[4]=0x%02X, buf[5]=0x%02X, buf[6]=0x%02X\n",
 			buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]);
+		if (retry == 1)
+			NVT_INFO("trim 0x%06x reads %*ph\n", ts->chip_ver_trim_addr,
+				 NVT_ID_BYTE_MAX, buf + 1);
 
 		// compare read chip id on supported list
 		for (list = 0; list < (sizeof(trim_id_table) / sizeof(struct nvt_ts_trim_id_table)); list++) {
@@ -1484,16 +1629,17 @@ static int32_t nvt_ts_check_chip_ver_trim(struct nvt_ts_hw_reg_addr_info hw_regs
 			}
 
 			if (found_nvt_chip) {
-				NVT_LOG("This is NVT touch IC\n");
+				NVT_INFO("chip id %*ph (trim table entry %d)\n",
+					 NVT_ID_BYTE_MAX, buf + 1, list);
 				if (trim_id_table[list].mmap->ENB_CASC_REG.addr) {
 					/* check single or cascade */
 					nvt_read_reg(trim_id_table[list].mmap->ENB_CASC_REG, &enb_casc);
 					/* NVT_LOG("ENB_CASC=0x%02X\n", enb_casc); */
 					if (enb_casc & 0x01) {
-						NVT_LOG("Single Chip\n");
+						NVT_INFO("single chip\n");
 						ts->mmap = trim_id_table[list].mmap;
 					} else {
-						NVT_LOG("Cascade Chip\n");
+						NVT_INFO("cascade chip\n");
 						ts->mmap = trim_id_table[list].mmap_casc;
 					}
 				} else {
@@ -1608,6 +1754,11 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	}
 	ts->client->bits_per_word = 8;
 	ts->client->mode = SPI_MODE_0;
+	/* chip select setup/hold time of the stock p81 driver */
+	ts->client->cs_setup.value = 300;
+	ts->client->cs_setup.unit = SPI_DELAY_UNIT_NSECS;
+	ts->client->cs_hold.value = 300;
+	ts->client->cs_hold.unit = SPI_DELAY_UNIT_NSECS;
 
 	ret = spi_setup(ts->client);
 	if (ret < 0) {
@@ -1640,15 +1791,19 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	/* If the device follows a DRM panel, configure panel follower */
 	if (drm_is_panel_follower(&client->dev)) {
 		ts->panel_follower.funcs = &nt36xxx_panel_follower_funcs;
-		devm_drm_panel_add_follower(&client->dev, &ts->panel_follower);
-	}
+		ret = devm_drm_panel_add_follower(&client->dev, &ts->panel_follower);
+		if (ret)
+			goto err_panelwait_failed;
+	} else
 #endif
-
-	//---eng reset before TP_RESX high
-	nvt_eng_reset();
-
-	// need 10ms delay after POR(power on reset)
-	msleep(10);
+	{
+		/*
+		 * No DRM panel to follow: the display, and with it the touch
+		 * half of this TDDI chip, was powered by the bootloader and is
+		 * kept on (continuous splash on a simple framebuffer).
+		 */
+		ts->panel_on = true;
+	}
 
 	while (!ts->panel_on) {
 		if (retry_count > 5) {
@@ -1661,6 +1816,12 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 		msleep(200);
 	}
 
+	//---eng reset after panel preparation
+	nvt_eng_reset();
+
+	// need 10ms delay after POR(power on reset)
+	usleep_range(10000, 11000);
+
 	//---check chip version trim---
 	ret = nvt_ts_check_chip_ver_trim_loop();
 	if (ret) {
@@ -1669,7 +1830,7 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 		goto err_chipvertrim_failed;
 	}
 
-	ts->thp_frame = kzalloc(NVT_THP_FRAME_LEN, GFP_KERNEL);
+	ts->thp_frame = kzalloc(NVT_THP_MAX_FRAME_LEN, GFP_KERNEL);
 	if (!ts->thp_frame) {
 		ret = -ENOMEM;
 		goto err_chipvertrim_failed;
@@ -1686,24 +1847,28 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	ts->y_num = TOUCH_DEFAULT_NUM_Y;
 	ts->abs_x_max = TOUCH_DEFAULT_MAX_WIDTH;
 	ts->abs_y_max = TOUCH_DEFAULT_MAX_HEIGHT;
+	ts->thp_payload_len = NVT_THP_DEFAULT_PAYLOAD_LEN;
 
 	ts->int_trigger_type = INT_TRIGGER_TYPE;
 
 	//---set int-pin & request irq---
-	client->irq = gpiod_to_irq(ts->irq_gpiod);
-	if (client->irq) {
-		NVT_LOG("int_trigger_type=%d\n", ts->int_trigger_type);
-		ts->irq_enabled = true;
-		ret = request_threaded_irq(client->irq, NULL, nvt_ts_work_func,
-				ts->int_trigger_type | IRQF_ONESHOT, NVT_SPI_NAME, ts);
-		if (ret != 0) {
-			NVT_ERR("request irq failed. ret=%d\n", ret);
-			goto err_int_request_failed;
-		} else {
-			nvt_irq_enable(false);
-			NVT_LOG("request irq %d succeed\n", client->irq);
-		}
+	ret = gpiod_to_irq(ts->irq_gpiod);
+	if (ret < 0) {
+		NVT_ERR("no IRQ for the NVT-int GPIO, ret=%d\n", ret);
+		goto err_int_request_failed;
 	}
+	client->irq = ret;
+	NVT_LOG("int_trigger_type=%d\n", ts->int_trigger_type);
+	/* the IRQ stays off until the boot firmware download succeeded */
+	ts->irq_enabled = false;
+	ret = request_threaded_irq(client->irq, NULL, nvt_ts_work_func,
+			ts->int_trigger_type | IRQF_ONESHOT | IRQF_NO_AUTOEN,
+			NVT_SPI_NAME, ts);
+	if (ret != 0) {
+		NVT_ERR("request irq failed. ret=%d\n", ret);
+		goto err_int_request_failed;
+	}
+	NVT_LOG("request irq %d succeed\n", client->irq);
 
 	ts->ic_state = NVT_IC_INIT;
 	ts->dev_pm_suspend = false;
@@ -1717,8 +1882,6 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 		goto err_create_nvt_fwu_wq_failed;
 	}
 	INIT_DELAYED_WORK(&ts->nvt_fwu_work, Boot_Update_Firmware);
-	// please make sure boot update start after display reset(RESX) sequence
-	queue_delayed_work(nvt_fwu_wq, &ts->nvt_fwu_work, 0);
 #endif
 
 	ts->event_wq = alloc_workqueue("nvt-event-queue",
@@ -1749,8 +1912,11 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 					  &nvt_thp_status_ops);
 	ts->thp_stylus_proc = proc_create("nvt_thp_stylus", 0600, NULL,
 					  &nvt_thp_stylus_ops);
+	ts->thp_cmd_proc = proc_create("nvt_thp_cmd", 0200, NULL,
+				       &nvt_thp_cmd_ops);
 	if (!ts->thp_raw_proc || !ts->thp_stream_proc ||
-	    !ts->thp_status_proc || !ts->thp_stylus_proc) {
+	    !ts->thp_status_proc || !ts->thp_stylus_proc ||
+	    !ts->thp_cmd_proc) {
 		ret = -ENOMEM;
 		goto err_create_thp_proc;
 	}
@@ -1758,11 +1924,20 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	bTouchIsAwake = 1;
 	NVT_LOG("end\n");
 
-	nvt_irq_enable(true);
+#if BOOT_UPDATE_FIRMWARE
+	/*
+	 * Download once everything above exists; the work enables the IRQ.
+	 * Please make sure boot update starts after the display reset (RESX)
+	 * sequence.
+	 */
+	queue_delayed_work(nvt_fwu_wq, &ts->nvt_fwu_work, 0);
+#endif
 
 	return 0;
 
 err_create_thp_proc:
+	if (ts->thp_cmd_proc)
+		proc_remove(ts->thp_cmd_proc);
 	if (ts->thp_status_proc)
 		proc_remove(ts->thp_status_proc);
 	if (ts->thp_stylus_proc)
@@ -1834,6 +2009,7 @@ static void nvt_ts_remove(struct spi_device *client)
 	bTouchIsAwake = 0;
 	WRITE_ONCE(ts->thp_capture_enabled, false);
 	wake_up_interruptible(&ts->thp_stream_wait);
+	proc_remove(ts->thp_cmd_proc);
 	proc_remove(ts->thp_status_proc);
 	proc_remove(ts->thp_stylus_proc);
 	proc_remove(ts->thp_stream_proc);
@@ -1998,11 +2174,6 @@ static int32_t nvt_ts_resume(struct device *dev)
 		NVT_ERR("IC state may error,caused by suspend/resume flow, please CHECK!!");
 	}
 
-	//enable idle baseline update
-	nvt_set_custom_cmd(0x19, 0x00);
-	nvt_set_doze_delay(120);
-	//enter doze mode
-	nvt_set_custom_cmd(0x01, 0x02);
 	nvt_thp_restore_stylus();
 
 	mutex_unlock(&ts->lock);

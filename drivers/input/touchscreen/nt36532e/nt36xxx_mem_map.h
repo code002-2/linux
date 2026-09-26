@@ -79,6 +79,8 @@ struct nvt_ts_mem_map {
 	uint32_t DMA_CRC_EN_ADDR;
 	uint32_t BLD_ILM_DLM_CRC_ADDR;
 	uint32_t DMA_CRC_FLAG_ADDR;
+	/* Xiaomi host touch computing (THP) polling info */
+	uint32_t XM_HTC_POLL_INFO_ADDR;
 };
 
 struct nvt_ts_hw_info {
@@ -176,11 +178,13 @@ static const struct nvt_ts_mem_map NT36532E_cascade_memory_map = {
 	.DMA_CRC_EN_ADDR          = 0x1FB536,
 	.BLD_ILM_DLM_CRC_ADDR     = 0x1FB533,
 	.DMA_CRC_FLAG_ADDR        = 0x1FB534,
-	//Unknown 0x1093D8
+	/* Xiaomi host touch computing */
+	.XM_HTC_POLL_INFO_ADDR    = 0x1093D8,
 };
 
 static const struct nvt_ts_mem_map NT36532_cascade_memory_map = {
-	.EVENT_BUF_ADDR           = 0x125800,
+	/* THP firmware event buffer (Xiaomi p81/piano, cascade chip) */
+	.EVENT_BUF_ADDR           = 0x11C400,
 	.RAW_PIPE0_ADDR           = 0x10B200,
 	.RAW_PIPE1_ADDR           = 0x10B200,
 	.BASELINE_ADDR            = 0x109E00,
@@ -229,6 +233,8 @@ static const struct nvt_ts_mem_map NT36532_cascade_memory_map = {
 	.DMA_CRC_EN_ADDR          = 0x1FB536,
 	.BLD_ILM_DLM_CRC_ADDR     = 0x1FB533,
 	.DMA_CRC_FLAG_ADDR        = 0x1FB534,
+	/* Xiaomi host touch computing */
+	.XM_HTC_POLL_INFO_ADDR    = 0x1093D8,
 };
 
 static const struct nvt_ts_mem_map NT36532_single_memory_map = {
