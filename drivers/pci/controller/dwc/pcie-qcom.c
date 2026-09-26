@@ -1018,11 +1018,9 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 	dev_info(dev, "piano-dbg: init clocks on (%d)\n", res->num_clks);
 
 	/*
-	 * Round 14: BCR cycle RESTORED (round 13 proved skipping it lets the
-	 * PARF writes through on the boot-left domain), now followed by a
-	 * forced genpd re-vote: put_noidle + get_sync makes the gdsc driver
-	 * re-write the collapse vote (0x5214c) and re-poll the GDSCR, so the
-	 * domain comes back powered with a properly reset core.
+	 * Bring-up only: keep the BCR order unchanged while measuring the
+	 * runtime-PM attempt below. R15 tried a mistyped GCC address before
+	 * either runtime-PM call; the complete exception trace is missing.
 	 */
 	dev_info(dev, "piano-dbg: asserting BCR\n");
 	ret = reset_control_assert(res->rst);
@@ -1036,27 +1034,59 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		dev_err(dev, "reset deassert failed (%d)\n", ret);
 		goto err_disable_clocks;
 	}
-	dev_info(dev, "piano-dbg: BCR cycled, real domain cycle next\n");
-	{
-		void __iomem *gdscr = ioremap(0x106b004, 4);
-		void __iomem *vote = ioremap(0x15214c, 4);
+	if (of_device_is_compatible(dev->of_node, "qcom,pcie-sm8750")) {
+		void __iomem *gdscr, *vote;
+		u32 cfg;
 
-		dev_info(dev, "piano-dbg: pre-cycle GDSCR=%08x vote=%08x\n",
-			 gdscr ? readl(gdscr) : 0, vote ? readl(vote) : 0);
-		pm_runtime_put_sync(dev);
-		dev_info(dev, "piano-dbg: after put GDSCR=%08x vote=%08x\n",
-			 gdscr ? readl(gdscr) : 0, vote ? readl(vote) : 0);
-		ret = pm_runtime_get_sync(dev);
-		if (ret < 0) {
-			dev_err(dev, "domain re-vote failed (%d)\n", ret);
+		/* GCC base + offsets from gcc-sm8750.c; CFG_GDSCR is +4. */
+		gdscr = devm_ioremap(dev, 0x00100000 + 0x6b004, 8);
+		vote = devm_ioremap(dev, 0x00100000 + 0x5214c, 4);
+		if (!gdscr || !vote) {
+			ret = -ENOMEM;
 			goto err_disable_clocks;
 		}
-		dev_info(dev, "piano-dbg: after get GDSCR=%08x vote=%08x\n",
-			 gdscr ? readl(gdscr) : 0, vote ? readl(vote) : 0);
-		iounmap(gdscr);
-		iounmap(vote);
+
+		dev_info(dev, "piano-dbg: BCR cycled; reading GCC 0x16b004/0x16b008/0x15214c\n");
+		dev_info(dev, "piano-dbg: pre-PM GDSCR=%08x CFG=%08x vote=%08x usage=%d suspended=%d\n",
+			 readl(gdscr), readl(gdscr + 4), readl(vote),
+			 atomic_read(&dev->power.usage_count),
+			 pm_runtime_suspended(dev));
+		dev_info(dev, "piano-dbg: calling pm_runtime_put_sync\n");
+		ret = pm_runtime_put_sync(dev);
+		dev_info(dev, "piano-dbg: put_sync ret=%d usage=%d suspended=%d\n",
+			 ret, atomic_read(&dev->power.usage_count),
+			 pm_runtime_suspended(dev));
+		if (ret < 0) {
+			/* put_sync drops the reference even on failure. */
+			pm_runtime_get_noresume(dev);
+			goto err_disable_clocks;
+		}
+
+		dev_info(dev, "piano-dbg: after put GDSCR=%08x CFG=%08x vote=%08x\n",
+			 readl(gdscr), readl(gdscr + 4), readl(vote));
+		dev_info(dev, "piano-dbg: calling pm_runtime_get_sync\n");
+		ret = pm_runtime_get_sync(dev);
+		dev_info(dev, "piano-dbg: get_sync ret=%d usage=%d suspended=%d\n",
+			 ret, atomic_read(&dev->power.usage_count),
+			 pm_runtime_suspended(dev));
+		if (ret < 0) {
+			dev_err(dev, "runtime resume failed (%d)\n", ret);
+			goto err_disable_clocks;
+		}
+
+		cfg = readl(gdscr + 4);
+		dev_info(dev, "piano-dbg: after get GDSCR=%08x CFG=%08x vote=%08x\n",
+			 readl(gdscr), cfg, readl(vote));
+		devm_iounmap(dev, gdscr);
+		devm_iounmap(dev, vote);
+		/* POLL_CFG_GDSCR uses CFG bit 16 for power-up complete. */
+		if (!(cfg & BIT(16))) {
+			dev_err(dev, "piano-dbg: GDSC not up; stopping before PARF\n");
+			ret = -EIO;
+			goto err_disable_clocks;
+		}
+		dev_info(dev, "piano-dbg: PM attempt complete (not proof of a domain cycle)\n");
 	}
-	dev_info(dev, "\n\npiano-dbg: === DOMAIN RECYCLED AFTER BCR ===\n\n");
 	usleep_range(1000, 1500);
 
 

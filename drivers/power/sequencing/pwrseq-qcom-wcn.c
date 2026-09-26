@@ -491,7 +491,11 @@ static int pwrseq_qcom_wcn_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(ctx->vddio), "Failed to get VDDIO\n");
 	}
 
+	dev_info(dev, "piano-dbg: PMU requesting bt-enable GPIO\n");
 	ctx->bt_gpio = devm_gpiod_get_optional(dev, "bt-enable", GPIOD_OUT_LOW);
+	dev_info(dev, "piano-dbg: PMU bt-enable result=%ld present=%d\n",
+		 IS_ERR(ctx->bt_gpio) ? PTR_ERR(ctx->bt_gpio) : 0L,
+		 !IS_ERR_OR_NULL(ctx->bt_gpio));
 	if (IS_ERR(ctx->bt_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->bt_gpio),
 				     "Failed to get the Bluetooth enable GPIO\n");
@@ -508,6 +512,7 @@ static int pwrseq_qcom_wcn_probe(struct platform_device *pdev)
 	if (IS_ERR(ctx->wlan_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->wlan_gpio),
 				     "Failed to get the WLAN enable GPIO\n");
+	dev_info(dev, "piano-dbg: PMU wlan-enable GPIO acquired\n");
 
 	ctx->xo_clk_gpio = devm_gpiod_get_optional(dev, "xo-clk",
 						   GPIOD_OUT_LOW);
@@ -535,11 +540,13 @@ static int pwrseq_qcom_wcn_probe(struct platform_device *pdev)
 	config.match = ctx->pdata->match ? : pwrseq_qcom_wcn_match;
 	config.targets = ctx->pdata->targets;
 
+	dev_info(dev, "piano-dbg: PMU registering power sequencer\n");
 	ctx->pwrseq = devm_pwrseq_device_register(dev, &config);
 	if (IS_ERR(ctx->pwrseq))
 		return dev_err_probe(dev, PTR_ERR(ctx->pwrseq),
 				     "Failed to register the power sequencer\n");
 
+	dev_info(dev, "piano-dbg: PMU probe complete\n");
 	return 0;
 }
 
