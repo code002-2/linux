@@ -1036,14 +1036,27 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		dev_err(dev, "reset deassert failed (%d)\n", ret);
 		goto err_disable_clocks;
 	}
-	dev_info(dev, "piano-dbg: BCR cycled, re-voting domain\n");
-	pm_runtime_put_noidle(dev);
-	ret = pm_runtime_get_sync(dev);
-	if (ret < 0) {
-		dev_err(dev, "domain re-vote failed (%d)\n", ret);
-		goto err_disable_clocks;
+	dev_info(dev, "piano-dbg: BCR cycled, real domain cycle next\n");
+	{
+		void __iomem *gdscr = ioremap(0x106b004, 4);
+		void __iomem *vote = ioremap(0x15214c, 4);
+
+		dev_info(dev, "piano-dbg: pre-cycle GDSCR=%08x vote=%08x\n",
+			 gdscr ? readl(gdscr) : 0, vote ? readl(vote) : 0);
+		pm_runtime_put_sync(dev);
+		dev_info(dev, "piano-dbg: after put GDSCR=%08x vote=%08x\n",
+			 gdscr ? readl(gdscr) : 0, vote ? readl(vote) : 0);
+		ret = pm_runtime_get_sync(dev);
+		if (ret < 0) {
+			dev_err(dev, "domain re-vote failed (%d)\n", ret);
+			goto err_disable_clocks;
+		}
+		dev_info(dev, "piano-dbg: after get GDSCR=%08x vote=%08x\n",
+			 gdscr ? readl(gdscr) : 0, vote ? readl(vote) : 0);
+		iounmap(gdscr);
+		iounmap(vote);
 	}
-	dev_info(dev, "\n\npiano-dbg: === DOMAIN RE-VOTED AFTER BCR ===\n\n");
+	dev_info(dev, "\n\npiano-dbg: === DOMAIN RECYCLED AFTER BCR ===\n\n");
 	usleep_range(1000, 1500);
 
 
