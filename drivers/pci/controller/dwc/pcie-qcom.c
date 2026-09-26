@@ -1059,26 +1059,33 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 
 	/*
 	 * Bring-up only: R15 used an invalid diagnostic address before its
-	 * proposed PM cycle. Keep the original BCR order, but measure the
-	 * domain before and after it. Do not cycle a live clocked domain.
+	 * proposed PM cycle. R16 reached "asserting BCR" but rebooted before
+	 * the next marker, with the corrected core GDSC already reporting
+	 * power-up complete. Skip this reset in the next experiment so that
+	 * the subsequent PARF path can be separated from the BCR failure.
 	 */
 	ret = qcom_pcie_piano_check_gdsc(dev, "before BCR");
 	if (ret)
 		goto err_disable_clocks;
 
-	dev_info(dev, "piano-dbg: asserting BCR\n");
-	ret = reset_control_assert(res->rst);
-	if (ret) {
-		dev_err(dev, "reset assert failed (%d)\n", ret);
-		goto err_disable_clocks;
+	if (of_device_is_compatible(dev->of_node, "qcom,pcie-sm8750")) {
+		dev_warn(dev, "piano-dbg: skipping BCR after R16 reset\n");
+	} else {
+		dev_info(dev, "piano-dbg: asserting BCR\n");
+		ret = reset_control_assert(res->rst);
+		if (ret) {
+			dev_err(dev, "reset assert failed (%d)\n", ret);
+			goto err_disable_clocks;
+		}
+		usleep_range(1000, 1500);
+		ret = reset_control_deassert(res->rst);
+		if (ret) {
+			dev_err(dev, "reset deassert failed (%d)\n", ret);
+			goto err_disable_clocks;
+		}
+		usleep_range(1000, 1500);
 	}
-	usleep_range(1000, 1500);
-	ret = reset_control_deassert(res->rst);
-	if (ret) {
-		dev_err(dev, "reset deassert failed (%d)\n", ret);
-		goto err_disable_clocks;
-	}
-	usleep_range(1000, 1500);
+
 	ret = qcom_pcie_piano_check_gdsc(dev, "after BCR");
 	if (ret)
 		goto err_disable_clocks;
