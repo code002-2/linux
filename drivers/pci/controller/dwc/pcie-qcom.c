@@ -2148,8 +2148,10 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 	} else {
 		/* Skip ICC init if OPP is supported as it is handled by OPP */
 		ret = qcom_pcie_icc_init(pcie);
-		if (ret)
+		if (ret) {
+			dev_info(dev, "piano-dbg: icc_init failed %d\n", ret);
 			goto err_pm_runtime_put;
+		}
 	}
 
 	ret = pcie->cfg->ops->get_resources(pcie);
@@ -2157,7 +2159,6 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 		dev_info(dev, "piano-dbg: get_resources failed %d\n", ret);
 		goto err_pm_runtime_put;
 	}
-
 	pp->ops = &qcom_pcie_dw_ops;
 
 	ret = qcom_pcie_parse_ports(pcie);
