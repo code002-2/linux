@@ -1961,16 +1961,24 @@ static int qcom_pcie_parse_ports(struct qcom_pcie *pcie)
 			return PTR_ERR(pcie->reset);
 	}
 
+	int n_ports = 0;
+
 	for_each_available_child_of_node_scoped(dev->of_node, of_port) {
+		dev_info(dev, "piano-dbg: child %pOF type=%s\n", of_port,
+			 of_node_get_property(of_port, "device_type", NULL) ? : "(none)");
 		if (!of_node_is_type(of_port, "pci"))
 			continue;
+		n_ports++;
 		ret = qcom_pcie_parse_port(pcie, of_port);
+		dev_info(dev, "piano-dbg: parse_port(%pOF) -> %d\n", of_port, ret);
 		if (ret) {
 			dev_err_probe(dev, ret, "failed to parse port %pOF\n",
 				      of_port);
 			goto err_port_del;
 		}
 	}
+	if (!n_ports)
+		dev_info(dev, "piano-dbg: no pci-type child port found\n");
 
 	return ret;
 
@@ -2145,12 +2153,15 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 	}
 
 	ret = pcie->cfg->ops->get_resources(pcie);
-	if (ret)
+	if (ret) {
+		dev_info(dev, "piano-dbg: get_resources failed %d\n", ret);
 		goto err_pm_runtime_put;
+	}
 
 	pp->ops = &qcom_pcie_dw_ops;
 
 	ret = qcom_pcie_parse_ports(pcie);
+	dev_info(dev, "piano-dbg: parse_ports -> %d\n", ret);
 	if (ret) {
 		if (ret != -ENODEV) {
 			dev_err_probe(pci->dev, ret,
@@ -2164,9 +2175,12 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 		 * node. This is to maintain DT backwards compatibility.
 		 */
 		ret = qcom_pcie_parse_legacy_binding(pcie);
+		dev_info(dev, "piano-dbg: legacy binding -> %d\n", ret);
 		if (ret)
 			goto err_pm_runtime_put;
 	}
+
+	dev_info(dev, "piano-dbg: proceeding to dw_pcie_host_init\n");
 
 	platform_set_drvdata(pdev, pcie);
 
