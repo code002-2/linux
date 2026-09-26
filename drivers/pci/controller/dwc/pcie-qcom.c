@@ -985,7 +985,8 @@ static int qcom_pcie_get_resources_2_7_0(struct qcom_pcie *pcie)
 	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(res->supplies),
 				      res->supplies);
 	if (ret)
-		return ret;
+		return dev_err_probe(dev, ret,
+				     "missing or unresolved vdda/vddpe-3v3 supplies\n");
 
 	res->num_clks = devm_clk_bulk_get_all(dev, &res->clks);
 	if (res->num_clks < 0) {
@@ -1964,8 +1965,11 @@ static int qcom_pcie_parse_ports(struct qcom_pcie *pcie)
 		if (!of_node_is_type(of_port, "pci"))
 			continue;
 		ret = qcom_pcie_parse_port(pcie, of_port);
-		if (ret)
+		if (ret) {
+			dev_err_probe(dev, ret, "failed to parse port %pOF\n",
+				      of_port);
 			goto err_port_del;
+		}
 	}
 
 	return ret;
