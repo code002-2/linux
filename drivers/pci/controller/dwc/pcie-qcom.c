@@ -1022,6 +1022,7 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		dev_err(dev, "reset assert failed (%d)\n", ret);
 		goto err_disable_clocks;
 	}
+	dev_info(dev, "\n\npiano-dbg: === BCR ASSERTED ===\n\n");
 
 	usleep_range(1000, 1500);
 
@@ -1030,30 +1031,36 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		dev_err(dev, "reset deassert failed (%d)\n", ret);
 		goto err_disable_clocks;
 	}
-	dev_info(dev, "piano-dbg: init reset cycled, first PARF write next\n");
+	dev_info(dev, "\n\npiano-dbg: === BCR DEASSERTED ===\n\n");
 
 	/* Wait for reset to complete, required on SM8450 */
 	usleep_range(1000, 1500);
 
+	dev_info(dev, "piano-dbg: P1 device-type\n");
 	/* configure PCIe to RC mode */
 	writel(DEVICE_TYPE_RC, pcie->parf + PARF_DEVICE_TYPE);
 
+	dev_info(dev, "piano-dbg: P2 phy-ctrl\n");
 	/* Force PHY out of lowest power state */
 	val = readl(pcie->parf + PARF_PHY_CTRL);
 	val &= ~PHY_TEST_PWR_DOWN;
 	writel(val, pcie->parf + PARF_PHY_CTRL);
 
+	dev_info(dev, "piano-dbg: P3 dbi-atu-base\n");
 	qcom_pcie_configure_dbi_atu_base(pcie);
 
+	dev_info(dev, "piano-dbg: P4 sys-ctrl\n");
 	/* MAC PHY_POWERDOWN MUX DISABLE  */
 	val = readl(pcie->parf + PARF_SYS_CTRL);
 	val &= ~MAC_PHY_POWERDOWN_IN_P2_D_MUX_EN;
 	writel(val, pcie->parf + PARF_SYS_CTRL);
 
+	dev_info(dev, "piano-dbg: P5 mhi-clk-rst\n");
 	val = readl(pcie->parf + PARF_MHI_CLOCK_RESET_CTRL);
 	val |= BYPASS;
 	writel(val, pcie->parf + PARF_MHI_CLOCK_RESET_CTRL);
 
+	dev_info(dev, "piano-dbg: P6 pm-ctrl\n");
 	/* Enable L1 and L1SS */
 	val = readl(pcie->parf + PARF_PM_CTRL);
 	val &= ~REQ_NOT_ENTR_L1;
@@ -1061,9 +1068,11 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 
 	pci->l1ss_support = true;
 
+	dev_info(dev, "piano-dbg: P7 axi-halt\n");
 	val = readl(pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT_V2);
 	val |= EN;
 	writel(val, pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT_V2);
+	dev_info(dev, "\n\npiano-dbg: === INIT 2.7.0 COMPLETE ===\n\n");
 	dev_info(dev, "piano-dbg: init PARF block done\n");
 
 	return 0;
