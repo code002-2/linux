@@ -1017,24 +1017,19 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		goto err_disable_regulators;
 	dev_info(dev, "piano-dbg: init clocks on (%d)\n", res->num_clks);
 
-	ret = reset_control_assert(res->rst);
-	if (ret) {
-		dev_err(dev, "reset assert failed (%d)\n", ret);
-		goto err_disable_clocks;
-	}
-	dev_info(dev, "\n\npiano-dbg: === BCR ASSERTED ===\n\n");
+	/*
+	 * Round 13 bring-up experiment: the BCR cycle is SKIPPED.
+	 * Field rounds 11-12: the machine dies on the first PARF write right
+	 * after the deassert — theory: the boot-loader-left GDSC is ON, the
+	 * BCR cycle collapses the VOTABLE domain (sm8750 gcc_pcie_0_gdsc
+	 * uses collapse_ctrl 0x5214c) and the re-vote is ineffective,
+	 * leaving PARF inaccessible (AXI hang -> watchdog). Skipping the
+	 * cycle tests whether the pre-existing power state suffices.
+	 */
+	dev_info(dev, "\n\npiano-dbg: === BCR CYCLE SKIPPED (experiment) ===\n\n");
 
 	usleep_range(1000, 1500);
 
-	ret = reset_control_deassert(res->rst);
-	if (ret) {
-		dev_err(dev, "reset deassert failed (%d)\n", ret);
-		goto err_disable_clocks;
-	}
-	dev_info(dev, "\n\npiano-dbg: === BCR DEASSERTED ===\n\n");
-
-	/* Wait for reset to complete, required on SM8450 */
-	usleep_range(1000, 1500);
 
 	dev_info(dev, "piano-dbg: P1 device-type\n");
 	/* configure PCIe to RC mode */
