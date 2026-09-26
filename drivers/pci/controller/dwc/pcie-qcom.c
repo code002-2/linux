@@ -1010,10 +1010,12 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		dev_err(dev, "cannot enable regulators\n");
 		return ret;
 	}
+	dev_info(dev, "piano-dbg: init regulators on\n");
 
 	ret = clk_bulk_prepare_enable(res->num_clks, res->clks);
 	if (ret < 0)
 		goto err_disable_regulators;
+	dev_info(dev, "piano-dbg: init clocks on (%d)\n", res->num_clks);
 
 	ret = reset_control_assert(res->rst);
 	if (ret) {
@@ -1028,6 +1030,7 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		dev_err(dev, "reset deassert failed (%d)\n", ret);
 		goto err_disable_clocks;
 	}
+	dev_info(dev, "piano-dbg: init reset cycled, first PARF write next\n");
 
 	/* Wait for reset to complete, required on SM8450 */
 	usleep_range(1000, 1500);
@@ -1061,6 +1064,7 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 	val = readl(pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT_V2);
 	val |= EN;
 	writel(val, pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT_V2);
+	dev_info(dev, "piano-dbg: init PARF block done\n");
 
 	return 0;
 err_disable_clocks:

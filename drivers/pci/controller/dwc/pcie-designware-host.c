@@ -621,9 +621,11 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 		}
 	}
 
+	dev_info(dev, "piano-dbg: msi phase done (use_imsi_rx=%d)\n", pp->use_imsi_rx);
 	dw_pcie_version_detect(pci);
-
+	dev_info(dev, "piano-dbg: version detect done\n");
 	dw_pcie_iatu_detect(pci);
+	dev_info(dev, "piano-dbg: iatu detect done\n");
 
 	if (pci->num_lanes < 1)
 		pci->num_lanes = dw_pcie_link_get_max_link_width(pci);
@@ -644,20 +646,24 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 	if (pp->use_atu_msg)
 		dw_pcie_host_request_msg_tlp_res(pp);
 
+	dev_info(dev, "piano-dbg: before edma detect\n");
 	ret = dw_pcie_edma_detect(pci);
 	if (ret)
 		goto err_free_msi;
 
+	dev_info(dev, "piano-dbg: before setup_rc\n");
 	ret = dw_pcie_setup_rc(pp);
 	if (ret)
 		goto err_remove_edma;
 
+	dev_info(dev, "piano-dbg: before start_link\n");
 	if (!dw_pcie_link_up(pci)) {
 		ret = dw_pcie_start_link(pci);
 		if (ret)
 			goto err_remove_edma;
 	}
 
+	dev_info(dev, "piano-dbg: waiting for link\n");
 	/*
 	 * Only fail on timeout error. Other errors indicate the device may
 	 * become available later, so continue without failing.
@@ -666,6 +672,8 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 	if (ret == -ETIMEDOUT)
 		goto err_stop_link;
 
+	dev_info(dev, "piano-dbg: before pci_host_probe (link=%d)\n",
+		 dw_pcie_link_up(pci));
 	ret = pci_host_probe(bridge);
 	if (ret)
 		goto err_stop_link;
