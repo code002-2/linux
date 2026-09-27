@@ -8,12 +8,14 @@
 #include <net/mac80211.h>
 #include <net/cfg80211.h>
 #include <linux/completion.h>
+#include <linux/etherdevice.h>
 #include <linux/if_ether.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/uuid.h>
 #include <linux/time.h>
 #include <linux/of.h>
+#include <linux/property.h>
 #include <linux/cleanup.h>
 #include <linux/percpu.h>
 #include <linux/refcount.h>
@@ -7079,6 +7081,25 @@ static int ath12k_ready_event(struct ath12k_base *ab, struct sk_buff *skb)
 	if (ret) {
 		ath12k_warn(ab, "failed to parse tlv %d\n", ret);
 		return ret;
+	}
+
+	/*
+	 * Boards whose OTP holds no MAC address report all zeroes here (on
+	 * Android the platform driver pushes one from persistent storage).
+	 * Fall back to the firmware node's (local-)mac-address, then to a
+	 * random locally administered address.
+	 */
+	if (!is_valid_ether_addr(ab->mac_addr)) {
+		if (!device_get_mac_address(ab->dev, ab->mac_addr) &&
+		    is_valid_ether_addr(ab->mac_addr)) {
+			ath12k_info(ab, "using MAC address %pM from firmware node\n",
+				    ab->mac_addr);
+		} else {
+			eth_random_addr(ab->mac_addr);
+			ath12k_warn(ab, "no valid MAC address, using random %pM\n",
+				    ab->mac_addr);
+		}
+		ab->pdevs_macaddr_valid = false;
 	}
 
 	complete(&ab->wmi_ab.unified_ready);
