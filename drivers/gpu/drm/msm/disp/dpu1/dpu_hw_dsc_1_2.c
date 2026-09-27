@@ -124,6 +124,10 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 
 	data |= (_dsc_calc_output_buf_max_addr(hw_dsc, num_active_slice_per_enc) << 18);
 
+	/* DPU 10.0+ need full ICH error precision above 8 bpc */
+	if (hw_dsc->mdss_ver->core_major_ver >= 10 && dsc->bits_per_component > 8)
+		data |= BIT(12);
+
 	DPU_REG_WRITE(hw, sblk->enc.base + ENC_DF_CTRL, data);
 
 	data = (dsc->dsc_version_minor & 0xf) << 28;
@@ -373,11 +377,13 @@ static void _setup_dcs_ops_1_2(struct dpu_hw_dsc_ops *ops)
  * @dev:  Corresponding device for devres management
  * @cfg:  DSC catalog entry for which driver object is required
  * @addr: Mapped register io address of MDP
+ * @mdss_ver: dpu core's major and minor versions
  * Returns: Error code or allocated dpu_hw_dsc context
  */
 struct dpu_hw_dsc *dpu_hw_dsc_init_1_2(struct drm_device *dev,
 				       const struct dpu_dsc_cfg *cfg,
-				       void __iomem *addr)
+				       void __iomem *addr,
+				       const struct dpu_mdss_version *mdss_ver)
 {
 	struct dpu_hw_dsc *c;
 
@@ -390,6 +396,7 @@ struct dpu_hw_dsc *dpu_hw_dsc_init_1_2(struct drm_device *dev,
 
 	c->idx = cfg->id;
 	c->caps = cfg;
+	c->mdss_ver = mdss_ver;
 	_setup_dcs_ops_1_2(&c->ops);
 
 	return c;

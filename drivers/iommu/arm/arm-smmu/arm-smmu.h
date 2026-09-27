@@ -277,6 +277,8 @@ struct arm_smmu_s2cr {
 	enum arm_smmu_s2cr_type		type;
 	enum arm_smmu_s2cr_privcfg	privcfg;
 	u8				cbndx;
+	/* Route inherited from the bootloader, left as is while set */
+	bool				boot;
 };
 
 struct arm_smmu_smr {
@@ -316,6 +318,8 @@ struct arm_smmu_device {
 	u32				num_context_banks;
 	u32				num_s2_context_banks;
 	DECLARE_BITMAP(context_map, ARM_SMMU_MAX_CBS);
+	/* Context banks used by inherited (boot) routes, never reset */
+	DECLARE_BITMAP(boot_cbs, ARM_SMMU_MAX_CBS);
 	struct arm_smmu_cb		*cbs;
 	atomic_t			irptndx;
 

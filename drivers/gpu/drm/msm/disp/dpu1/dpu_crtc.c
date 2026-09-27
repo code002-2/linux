@@ -1609,8 +1609,15 @@ static enum drm_mode_status dpu_crtc_mode_valid(struct drm_crtc *crtc,
 	    mode->hdisplay > dpu_kms->catalog->caps->max_mixer_width)
 		return MODE_BAD_HVALUE;
 
-	adjusted_mode_clk = dpu_core_perf_adjusted_mode_clk(mode->clock,
-							    dpu_kms->perf.perf_cfg);
+	/*
+	 * Check the same rate the core clock is voted for: the mixers only
+	 * process the active pixels of each line, so the horizontal blanking
+	 * in mode->clock does not load them.
+	 */
+	adjusted_mode_clk = dpu_core_perf_adjusted_mode_clk(
+		div_u64((u64)mode->vtotal * mode->hdisplay *
+			drm_mode_vrefresh(mode), 1000),
+		dpu_kms->perf.perf_cfg);
 
 	if (dpu_kms->catalog->caps->has_3d_merge)
 		adjusted_mode_clk /= 2;

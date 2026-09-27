@@ -133,9 +133,14 @@ static void drm_mode_to_intf_timing_params(
 		/*
 		 * TODO: replace drm_dsc_get_bpp_int with logic to handle
 		 * fractional part if there is fraction
+		 *
+		 * Round up like the DSI host does for its active width: with
+		 * e.g. 10 bpc at 8 bpp the ratio is not integral, and a line
+		 * one clock shorter than the DSI one makes the interface run
+		 * ahead of the DSI video engine until its FIFO overflows.
 		 */
-		timing->width = timing->width * drm_dsc_get_bpp_int(dsc) /
-				(dsc->bits_per_component * 3);
+		timing->width = DIV_ROUND_UP(timing->width * drm_dsc_get_bpp_int(dsc),
+					     dsc->bits_per_component * 3);
 		timing->xres = timing->width;
 		timing->dce_bytes_per_line = msm_dsc_get_bytes_per_line(dsc);
 	}

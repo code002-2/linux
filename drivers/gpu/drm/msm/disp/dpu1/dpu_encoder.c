@@ -12,6 +12,7 @@
 #include <linux/kthread.h>
 #include <linux/seq_file.h>
 
+#include <drm/display/drm_dsc_helper.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_file.h>
@@ -1964,27 +1965,36 @@ int dpu_encoder_vsync_time(struct drm_encoder *drm_enc, ktime_t *wakeup_time)
 
 static u32
 dpu_encoder_dsc_initial_line_calc(struct drm_dsc_config *dsc,
-				  u32 enc_ip_width)
+				  u32 enc_ip_width, u32 dsc_common_mode)
 {
-	int ssm_delay, total_pixels, soft_slice_per_enc;
-
-	soft_slice_per_enc = enc_ip_width / dsc->slice_width;
-
 	/*
-	 * minimum number of initial line pixels is a sum of:
-	 * 1. sub-stream multiplexer delay (83 groups for 8bpc,
-	 *    91 for 10 bpc) * 3
-	 * 2. for two soft slice cases, add extra sub-stream multiplexer * 3
-	 * 3. the initial xmit delay
-	 * 4. total pipeline delay through the "lock step" of encoder (47)
-	 * 5. 6 additional pixels as the output of the rate buffer is
-	 *    48 bits wide
+	 * Latency model of the DSC 1.2 encoder core (rtl_max_bpc 10, 64-bit
+	 * output data path, pipeline latency 28), as used by the vendor
+	 * driver. The simpler estimate this replaces undercounts the output
+	 * buffer and multi-slice latency and gives one line too few for
+	 * e.g. 10 bpc, 8 bpp, two 800 pixel soft slices per encoder.
 	 */
-	ssm_delay = ((dsc->bits_per_component < 10) ? 84 : 92);
-	total_pixels = ssm_delay * 3 + dsc->initial_xmit_delay + 47;
-	if (soft_slice_per_enc > 1)
-		total_pixels += (ssm_delay * 3);
-	return DIV_ROUND_UP(total_pixels, dsc->slice_width);
+	const int max_ssm_delay = 4 * (10 + 1) + 48 - 1;
+	const int ob_data_width = 64;
+	int soft_slice_per_enc = enc_ip_width / dsc->slice_width;
+	int mux_word_size = dsc->bits_per_component >= 12 ? 64 : 48;
+	int bpp = drm_dsc_get_bpp_int(dsc);
+	int chunk_bits = 8 * dsc->slice_chunk_size;
+	int base_hs_latency, extra_bits;
+
+	base_hs_latency = dsc->initial_xmit_delay +
+		28 + 3 * (max_ssm_delay + 2) * soft_slice_per_enc +
+		DIV_ROUND_UP(9 * ob_data_width + mux_word_size, bpp) + 1;
+
+	if (((dsc_common_mode & DSC_MODE_SPLIT_PANEL) &&
+	     (dsc_common_mode & DSC_MODE_MULTIPLEX)) ||
+	    (soft_slice_per_enc > 1 && ob_data_width > bpp))
+		extra_bits = chunk_bits;
+	else
+		extra_bits = ((ob_data_width - bpp) * chunk_bits) >> 6;
+
+	return DIV_ROUND_UP(base_hs_latency + DIV_ROUND_UP(extra_bits, bpp),
+			    dsc->slice_width);
 }
 
 static void dpu_encoder_dsc_pipe_cfg(struct dpu_hw_ctl *ctl,
@@ -2052,7 +2062,8 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 	intf_ip_w = this_frame_slices * dsc->slice_width;
 
 	enc_ip_w = intf_ip_w / num_dsc;
-	initial_lines = dpu_encoder_dsc_initial_line_calc(dsc, enc_ip_w);
+	initial_lines = dpu_encoder_dsc_initial_line_calc(dsc, enc_ip_w,
+							  dsc_common_mode);
 
 	for (i = 0; i < num_dsc; i++)
 		dpu_encoder_dsc_pipe_cfg(ctl, hw_dsc[i], hw_pp[i],

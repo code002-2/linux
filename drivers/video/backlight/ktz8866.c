@@ -48,6 +48,9 @@ struct ktz8866 {
 	struct regmap *regmap;
 	bool led_on;
 	struct gpio_desc *enable_gpio;
+	struct backlight_device *backlight;
+	/* Optional second chip mirroring every register write */
+	struct regmap *secondary;
 };
 
 static const struct regmap_config ktz8866_regmap_config = {
@@ -59,13 +62,25 @@ static const struct regmap_config ktz8866_regmap_config = {
 static int ktz8866_write(struct ktz8866 *ktz, unsigned int reg,
 			 unsigned int val)
 {
-	return regmap_write(ktz->regmap, reg, val);
+	int ret;
+
+	ret = regmap_write(ktz->regmap, reg, val);
+	if (!ret && ktz->secondary)
+		ret = regmap_write(ktz->secondary, reg, val);
+
+	return ret;
 }
 
 static int ktz8866_update_bits(struct ktz8866 *ktz, unsigned int reg,
 			       unsigned int mask, unsigned int val)
 {
-	return regmap_update_bits(ktz->regmap, reg, mask, val);
+	int ret;
+
+	ret = regmap_update_bits(ktz->regmap, reg, mask, val);
+	if (!ret && ktz->secondary)
+		ret = regmap_update_bits(ktz->secondary, reg, mask, val);
+
+	return ret;
 }
 
 static int ktz8866_backlight_update_status(struct backlight_device *backlight_dev)
@@ -124,9 +139,64 @@ static void ktz8866_init(struct ktz8866 *ktz)
 		ktz8866_write(ktz, LCD_BIAS_CFG1, LCD_BIAS_EN);
 }
 
+/*
+ * Keep the brightness the bootloader left behind instead of jumping to the
+ * default when the backlight is already on.
+ */
+static unsigned int ktz8866_get_initial_brightness(struct ktz8866 *ktz)
+{
+	unsigned int en, lsb, msb, brightness;
+
+	if (regmap_read(ktz->regmap, BL_EN, &en) || !(en & BL_EN_BIT) ||
+	    regmap_read(ktz->regmap, BL_BRT_LSB, &lsb) ||
+	    regmap_read(ktz->regmap, BL_BRT_MSB, &msb))
+		return DEFAULT_BRIGHTNESS;
+
+	brightness = (msb << 3) | (lsb & 0x7);
+
+	return brightness ?: DEFAULT_BRIGHTNESS;
+}
+
+static void ktz8866_put_device(void *data)
+{
+	put_device(data);
+}
+
+static int ktz8866_get_secondary(struct ktz8866 *ktz)
+{
+	struct device *dev = &ktz->client->dev;
+	struct i2c_client *client;
+	struct ktz8866 *secondary;
+	struct device_node *np;
+	int ret;
+
+	np = of_parse_phandle(dev->of_node, "kinetic,secondary-backlight", 0);
+	if (!np)
+		return 0;
+
+	client = of_find_i2c_device_by_node(np);
+	of_node_put(np);
+	if (!client)
+		return dev_err_probe(dev, -EPROBE_DEFER, "secondary chip not registered\n");
+
+	ret = devm_add_action_or_reset(dev, ktz8866_put_device, &client->dev);
+	if (ret)
+		return ret;
+
+	secondary = i2c_get_clientdata(client);
+	if (!secondary || !client->dev.driver)
+		return dev_err_probe(dev, -EPROBE_DEFER, "secondary chip not bound\n");
+
+	if (!device_link_add(dev, &client->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
+		return dev_err_probe(dev, -EINVAL, "failed to link secondary chip\n");
+
+	ktz->secondary = secondary->regmap;
+
+	return 0;
+}
+
 static int ktz8866_probe(struct i2c_client *client)
 {
-	struct backlight_device *backlight_dev;
 	struct backlight_properties props;
 	struct ktz8866 *ktz;
 	int ret = 0;
@@ -139,6 +209,16 @@ static int ktz8866_probe(struct i2c_client *client)
 	ktz->regmap = devm_regmap_init_i2c(client, &ktz8866_regmap_config);
 	if (IS_ERR(ktz->regmap))
 		return dev_err_probe(&client->dev, PTR_ERR(ktz->regmap), "failed to init regmap\n");
+
+	/* A secondary chip is only programmed through its primary */
+	if (of_property_read_bool(client->dev.of_node, "kinetic,secondary")) {
+		i2c_set_clientdata(client, ktz);
+		return 0;
+	}
+
+	ret = ktz8866_get_secondary(ktz);
+	if (ret)
+		return ret;
 
 	ret = devm_regulator_get_enable(&client->dev, "vddpos");
 	if (ret)
@@ -154,28 +234,32 @@ static int ktz8866_probe(struct i2c_client *client)
 	memset(&props, 0, sizeof(props));
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = MAX_BRIGHTNESS;
-	props.brightness = DEFAULT_BRIGHTNESS;
+	props.brightness = ktz8866_get_initial_brightness(ktz);
 	props.scale = BACKLIGHT_SCALE_LINEAR;
 
-	backlight_dev = devm_backlight_device_register(&client->dev, "ktz8866-backlight",
+	ktz->backlight = devm_backlight_device_register(&client->dev, "ktz8866-backlight",
 					&client->dev, ktz, &ktz8866_backlight_ops, &props);
-	if (IS_ERR(backlight_dev))
-		return dev_err_probe(&client->dev, PTR_ERR(backlight_dev),
+	if (IS_ERR(ktz->backlight))
+		return dev_err_probe(&client->dev, PTR_ERR(ktz->backlight),
 				"failed to register backlight device\n");
 
 	ktz8866_init(ktz);
 
-	i2c_set_clientdata(client, backlight_dev);
-	backlight_update_status(backlight_dev);
+	i2c_set_clientdata(client, ktz);
+	backlight_update_status(ktz->backlight);
 
 	return 0;
 }
 
 static void ktz8866_remove(struct i2c_client *client)
 {
-	struct backlight_device *backlight_dev = i2c_get_clientdata(client);
-	backlight_dev->props.brightness = 0;
-	backlight_update_status(backlight_dev);
+	struct ktz8866 *ktz = i2c_get_clientdata(client);
+
+	if (!ktz->backlight)
+		return;
+
+	ktz->backlight->props.brightness = 0;
+	backlight_update_status(ktz->backlight);
 }
 
 static const struct i2c_device_id ktz8866_ids[] = {

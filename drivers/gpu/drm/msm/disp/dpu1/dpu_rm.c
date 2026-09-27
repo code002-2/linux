@@ -169,7 +169,7 @@ int dpu_rm_init(struct drm_device *dev,
 		const struct dpu_dsc_cfg *dsc = &cat->dsc[i];
 
 		if (cat->mdss_ver->core_major_ver >= 7)
-			hw = dpu_hw_dsc_init_1_2(dev, dsc, mmio);
+			hw = dpu_hw_dsc_init_1_2(dev, dsc, mmio, cat->mdss_ver);
 		else
 			hw = dpu_hw_dsc_init(dev, dsc, mmio, cat->mdss_ver);
 

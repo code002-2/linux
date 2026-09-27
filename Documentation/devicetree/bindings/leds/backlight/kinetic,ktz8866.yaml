@@ -55,12 +55,37 @@ properties:
     description: Set if we want to output bias power supply for LCD.
     type: boolean
 
+  kinetic,secondary-backlight:
+    description:
+      Second KTZ8866 driving the other half of the LED strings of the same
+      panel. Every register write to this chip is mirrored to it.
+    $ref: /schemas/types.yaml#/definitions/phandle
+
+  kinetic,secondary:
+    description:
+      This chip is programmed only through the primary chip that references
+      it with kinetic,secondary-backlight and does not provide a backlight
+      device on its own.
+    type: boolean
+
 required:
   - compatible
   - reg
-  - vddpos-supply
-  - vddneg-supply
-  - enable-gpios
+
+if:
+  required:
+    - kinetic,secondary
+then:
+  properties:
+    vddpos-supply: false
+    vddneg-supply: false
+    enable-gpios: false
+    kinetic,secondary-backlight: false
+else:
+  required:
+    - vddpos-supply
+    - vddneg-supply
+    - enable-gpios
 
 unevaluatedProperties: false
 
@@ -82,5 +107,33 @@ examples:
             kinetic,current-ramp-delay-ms = <128>;
             kinetic,led-enable-ramp-delay-ms = <1>;
             kinetic,enable-lcd-bias;
+        };
+    };
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        backlight@11 {
+            compatible = "kinetic,ktz8866";
+            reg = <0x11>;
+            vddpos-supply = <&bl_vddpos>;
+            vddneg-supply = <&bl_vddneg>;
+            enable-gpios = <&tlmm 2 GPIO_ACTIVE_HIGH>;
+            current-num-sinks = <6>;
+            kinetic,secondary-backlight = <&backlight_secondary>;
+        };
+    };
+
+    i2c-1 {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        backlight_secondary: backlight@11 {
+            compatible = "kinetic,ktz8866";
+            reg = <0x11>;
+            kinetic,secondary;
         };
     };

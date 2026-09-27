@@ -1072,7 +1072,7 @@ static int arm_smmu_find_sme(struct arm_smmu_device *smmu, u16 id, u16 mask)
 
 static bool arm_smmu_free_sme(struct arm_smmu_device *smmu, int idx)
 {
-	if (--smmu->s2crs[idx].count)
+	if (--smmu->s2crs[idx].count || smmu->s2crs[idx].boot)
 		return false;
 
 	smmu->s2crs[idx] = s2cr_init_val;
@@ -1117,7 +1117,8 @@ static int arm_smmu_master_alloc_smes(struct device *dev)
 
 	/* It worked! Now, poke the actual hardware */
 	for_each_cfg_sme(cfg, fwspec, i, idx)
-		arm_smmu_write_sme(smmu, idx);
+		if (!smmu->s2crs[idx].boot)
+			arm_smmu_write_sme(smmu, idx);
 
 	mutex_unlock(&smmu->stream_map_mutex);
 	return 0;
@@ -1157,6 +1158,13 @@ static void arm_smmu_master_install_s2crs(struct arm_smmu_master_cfg *cfg,
 	for_each_cfg_sme(cfg, fwspec, i, idx) {
 		if (type == s2cr[idx].type && cbndx == s2cr[idx].cbndx)
 			continue;
+
+		/* An inherited route already bypasses translation. */
+		if (s2cr[idx].boot) {
+			if (type == S2CR_TYPE_BYPASS)
+				continue;
+			s2cr[idx].boot = false;
+		}
 
 		s2cr[idx].type = type;
 		s2cr[idx].privcfg = S2CR_PRIVCFG_DEFAULT;
@@ -1672,10 +1680,13 @@ static void arm_smmu_device_reset(struct arm_smmu_device *smmu)
 	 * invalid and all S2CRn as bypass unless overridden.
 	 */
 	for (i = 0; i < smmu->num_mapping_groups; ++i)
-		arm_smmu_write_sme(smmu, i);
+		if (!smmu->s2crs[i].boot)
+			arm_smmu_write_sme(smmu, i);
 
 	/* Make sure all context banks are disabled and clear CB_FSR  */
 	for (i = 0; i < smmu->num_context_banks; ++i) {
+		if (test_bit(i, smmu->boot_cbs))
+			continue;
 		arm_smmu_write_context_bank(smmu, i);
 		arm_smmu_cb_write(smmu, i, ARM_SMMU_CB_FSR, ARM_SMMU_CB_FSR_FAULT);
 	}

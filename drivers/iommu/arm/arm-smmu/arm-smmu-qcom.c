@@ -523,6 +523,27 @@ static int qcom_smmu_cfg_probe(struct arm_smmu_device *smmu)
 			smmu->smrs[i].mask = FIELD_GET(ARM_SMMU_SMR_MASK, smr);
 			smmu->smrs[i].valid = true;
 
+			/*
+			 * When the hypervisor emulates bypass, moving a live
+			 * stream from its bootloader context bank to the
+			 * emulated bypass bank resets the SoC (seen on
+			 * SM8750). Keep such routes and their banks as they
+			 * are until a translating domain is attached.
+			 */
+			reg = arm_smmu_gr0_read(smmu, ARM_SMMU_GR0_S2CR(i));
+			if (qsmmu->bypass_quirk &&
+			    FIELD_GET(ARM_SMMU_S2CR_TYPE, reg) == S2CR_TYPE_TRANS) {
+				u8 cbndx = FIELD_GET(ARM_SMMU_S2CR_CBNDX, reg);
+
+				smmu->s2crs[i].type = S2CR_TYPE_TRANS;
+				smmu->s2crs[i].privcfg = FIELD_GET(ARM_SMMU_S2CR_PRIVCFG, reg);
+				smmu->s2crs[i].cbndx = cbndx;
+				smmu->s2crs[i].boot = true;
+				set_bit(cbndx, smmu->boot_cbs);
+				set_bit(cbndx, smmu->context_map);
+				continue;
+			}
+
 			smmu->s2crs[i].type = S2CR_TYPE_BYPASS;
 			smmu->s2crs[i].privcfg = S2CR_PRIVCFG_DEFAULT;
 			smmu->s2crs[i].cbndx = 0xff;
