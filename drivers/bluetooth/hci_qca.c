@@ -1294,6 +1294,10 @@ static unsigned int piano_peri;
 module_param(piano_peri, uint, 0644);
 MODULE_PARM_DESC(piano_peri, "piano bring-up: PERI steps bitmask (1 ver, 2 arbitrate, 4 activate BT, 8 patch+nvm+reset)");
 
+static unsigned int piano_peri_baud = 8000000;
+module_param(piano_peri_baud, uint, 0644);
+MODULE_PARM_DESC(piano_peri_baud, "piano bring-up: PERI operating UART rate (piano_peri bit 64)");
+
 static DECLARE_COMPLETION(piano_peri_rx);
 static u8 piano_peri_last[64];
 static int piano_peri_last_len;
@@ -1373,7 +1377,8 @@ static int piano_peri_tlv(struct hci_uart *hu, const char *fwname)
 		serdev_device_write(hu->serdev, pkt, 8 + n, MAX_SCHEDULE_TIMEOUT);
 		/* patch TLVs ack only the last segment, NVM TLVs every one */
 		if (wait_for_completion_timeout(&piano_peri_rx,
-				msecs_to_jiffies(off + n >= fw->size ? 1000 : 30))) {
+				msecs_to_jiffies(off + n >= fw->size ? 1000 :
+						   qca_peach_fast_uart ? 2 : 30))) {
 			acks++;
 			if (acks == 1 || off + n >= fw->size ||
 			    (piano_peri_last_len > 9 && piano_peri_last[9]))
@@ -2191,6 +2196,31 @@ retry:
 			goto out;
 	}
 
+	qca_peach_fast_uart = false;
+	if (soc_type == QCA_WCN7861 && hu->serdev && (piano_peri & 64)) {
+		/*
+		 * PERI generic 0x02: switch the UART rate.  Flow off, command,
+		 * 20 ms, host switch, flow on; the reply comes at the new rate.
+		 */
+		u8 baud[] = { 0x31, 0x00, 0xf1, 0xff, 0x02, 0x02,
+			      qca_get_baudrate_value(piano_peri_baud) };
+
+		reinit_completion(&piano_peri_rx);
+		bt_dev_info(hdev, "PERI tx set-baud %u: %*ph", piano_peri_baud,
+			    (int)sizeof(baud), baud);
+		hci_uart_set_flow_control(hu, true);
+		serdev_device_write(hu->serdev, baud, sizeof(baud), MAX_SCHEDULE_TIMEOUT);
+		serdev_device_wait_until_sent(hu->serdev, 0);
+		msleep(20);
+		host_set_baudrate(hu, piano_peri_baud);
+		hci_uart_set_flow_control(hu, false);
+		if (wait_for_completion_timeout(&piano_peri_rx, msecs_to_jiffies(1000))) {
+			qca_peach_fast_uart = true;
+			bt_dev_info(hdev, "PERI now at %u baud", piano_peri_baud);
+		} else {
+			bt_dev_err(hdev, "PERI set-baud: no reply at %u", piano_peri_baud);
+		}
+	}
 	if (soc_type == QCA_WCN7861 && hu->serdev && (piano_peri & 0xb)) {
 		static const u8 act[] = { 0x31, 0x00, 0xf1, 0xff, 0x03, 0x00, 0x01, 0x01 };
 		static const u8 pver[] = { 0x31, 0x00, 0xf0, 0xff, 0x02, 0x05, 0x00 };

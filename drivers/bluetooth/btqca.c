@@ -13,6 +13,10 @@
 
 #include "btqca.h"
 
+/* set by hci_qca once the Peach PERI has moved the UART to its operating rate */
+bool qca_peach_fast_uart;
+EXPORT_SYMBOL_GPL(qca_peach_fast_uart);
+
 int qca_read_soc_version(struct hci_dev *hdev, struct qca_btsoc_version *ver,
 			 enum qca_btsoc_type soc_type)
 {
@@ -804,7 +808,8 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 		config.current_baud_download =
 			((soc_id == 0x40210100 && tuple_rom == 0x0100) ||
 			 (soc_id == 0x40210200 && tuple_rom == 0x0200)) &&
-			(product_id == 0x1e || product_id == 0x21);
+			(product_id == 0x1e || product_id == 0x21) &&
+			!qca_peach_fast_uart;
 	}
 
 	/* Firmware files to download are based on ROM version.
