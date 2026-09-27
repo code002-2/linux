@@ -2193,14 +2193,28 @@ retry:
 
 	if (soc_type == QCA_WCN7861 && hu->serdev && (piano_peri & 0xb)) {
 		static const u8 act[] = { 0x31, 0x00, 0xf1, 0xff, 0x03, 0x00, 0x01, 0x01 };
-		static const u8 ver[] = { 0x31, 0x00, 0xf0, 0xff, 0x02, 0x05, 0x00 };
+		static const u8 pver[] = { 0x31, 0x00, 0xf0, 0xff, 0x02, 0x05, 0x00 };
 		static const u8 arb[] = { 0x31, 0x00, 0xf0, 0xff, 0x03, 0x08, 0x00, 0x00 };
 
 		if (piano_peri & 1)
-			piano_peri_cmd(hu, "peri-getver", ver, sizeof(ver), 1000);
-		if (piano_peri & 2)
+			piano_peri_cmd(hu, "peri-getver", pver, sizeof(pver), 1000);
+		bool patched = false;
+
+		if (piano_peri & 2) {
 			piano_peri_cmd(hu, "peri-arbitrate", arb, sizeof(arb), 2000);
-		if (piano_peri & 8) {
+			/* cmd complete ... f0 ff <status> 08 <state>: 0x17 = patched */
+			patched = piano_peri_last_len >= 11 && piano_peri_last[10] == 0x17;
+			if (patched)
+				bt_dev_info(hdev, "PERI already patched, skipping download");
+		}
+		if (piano_peri & 16) {
+			static const u8 tarb[] = { 0x31, 0x00, 0xf0, 0xff, 0x03, 0x08, 0x03, 0x00 };
+
+			piano_peri_cmd(hu, "tme-arbitrate", tarb, sizeof(tarb), 2000);
+		}
+		if ((piano_peri & 8) && patched) {
+			piano_peri_cmd(hu, "peri-activate-bt", act, sizeof(act), 2000);
+		} else if (piano_peri & 8) {
 			static const u8 bid[] = { 0x31, 0x00, 0xf0, 0xff, 0x01, 0x0a };
 			static const u8 bld[] = { 0x31, 0x00, 0xf0, 0xff, 0x02, 0x09, 0x00 };
 			static const u8 rst[] = { 0x31, 0x00, 0xf1, 0xff, 0x01, 0x03 };
@@ -2213,6 +2227,18 @@ retry:
 				/* patching PERI deactivates the BT subsystem */
 				piano_peri_cmd(hu, "peri-activate-bt", act, sizeof(act), 2000);
 			}
+		}
+		if (piano_peri & 32) {
+			/* wake the freshly activated BT side, then re-read its version */
+			static const u8 wake = 0xfd;
+
+			serdev_device_write_buf(hu->serdev, &wake, 1);
+			serdev_device_wait_until_sent(hu->serdev, 0);
+			msleep(100);
+			ret = qca_read_soc_version(hdev, &ver, soc_type);
+			bt_dev_info(hdev, "PERI: BT version after activation: %d", ret);
+			if (ret)
+				goto out;
 		}
 	}
 
