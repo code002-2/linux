@@ -21,6 +21,7 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/devcoredump.h>
+#include <linux/firmware.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
@@ -1280,6 +1281,116 @@ static int qca_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
 	.lsize = 0, \
 	.maxlen = HCI_MAX_IBS_SIZE
 
+
+/*
+ * piano bring-up: Brahma PERI subsystem probing.  The UART is owned by a
+ * peripheral (PERI) subsystem that talks its own H4 packet type 0x34
+ * (host id, event, length, payload); commands go out as type 0x31 (host
+ * id, opcode, length, payload).  piano_peri is a bitmask of steps run
+ * before the BT rampatch: 1 = version, 2 = arbitration, 4 = activate BT
+ * subsystem (after setup).  Every PERI frame is logged.
+ */
+static unsigned int piano_peri;
+module_param(piano_peri, uint, 0644);
+MODULE_PARM_DESC(piano_peri, "piano bring-up: PERI steps bitmask (1 ver, 2 arbitrate, 4 activate BT, 8 patch+nvm+reset)");
+
+static DECLARE_COMPLETION(piano_peri_rx);
+static u8 piano_peri_last[64];
+static int piano_peri_last_len;
+
+static bool piano_peri_quiet;
+
+static int qca_recv_peri(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	/* crash dumps (event 0x04) arrive as hundreds of frames: first/last only */
+	bool dump = skb->len > 6 && skb->data[3] == 0xf0 && skb->data[4] == 0x04;
+	u16 seq = dump ? get_unaligned_le16(skb->data + 5) : 0;
+
+	if (!piano_peri_quiet && (!dump || seq == 0 || seq == 0xffff))
+		bt_dev_info(hdev, "PERI rx: %*ph", min_t(int, skb->len, 48), skb->data);
+	piano_peri_last_len = min_t(int, skb->len, sizeof(piano_peri_last));
+	memcpy(piano_peri_last, skb->data, piano_peri_last_len);
+	complete(&piano_peri_rx);
+	kfree_skb(skb);
+	return 0;
+}
+
+#define QCA_PERI_EVENT \
+	.type = 0x34, \
+	.hlen = 3, \
+	.loff = 2, \
+	.lsize = 1, \
+	.maxlen = HCI_MAX_EVENT_SIZE
+
+/* send one PERI command, then log every PERI frame for up to @ms */
+static int piano_peri_cmd(struct hci_uart *hu, const char *name,
+			  const u8 *cmd, int len, int ms)
+{
+	struct hci_dev *hdev = hu->hdev;
+	int n = 0;
+
+	reinit_completion(&piano_peri_rx);
+	bt_dev_info(hdev, "PERI tx %s: %*ph", name, len, cmd);
+	serdev_device_write_buf(hu->serdev, cmd, len);
+	serdev_device_wait_until_sent(hu->serdev, 0);
+	while (wait_for_completion_timeout(&piano_peri_rx, msecs_to_jiffies(ms))) {
+		reinit_completion(&piano_peri_rx);
+		n++;
+		ms = 300;	/* collect trailing notifications */
+	}
+	if (!n)
+		bt_dev_info(hdev, "PERI %s: no reply", name);
+	return n;
+}
+
+/*
+ * Stream a PERI TLV (patch or NVM) as EDL 0x06 segments of up to 243
+ * bytes: 31 00 f0 ff <n+3> 06 00 <n> <data>.  Each segment waits up to
+ * 200 ms for an acknowledgement; replies are counted, not required.
+ */
+static int piano_peri_tlv(struct hci_uart *hu, const char *fwname)
+{
+	struct hci_dev *hdev = hu->hdev;
+	const struct firmware *fw;
+	u8 pkt[8 + 243];
+	size_t off;
+	int acks = 0, segs = 0, ret;
+
+	ret = request_firmware(&fw, fwname, &hdev->dev);
+	if (ret) {
+		bt_dev_err(hdev, "PERI: %s not loaded (%d)", fwname, ret);
+		return ret;
+	}
+	bt_dev_info(hdev, "PERI: downloading %s (%zu bytes)", fwname, fw->size);
+	piano_peri_quiet = true;
+	for (off = 0; off < fw->size; off += 243, segs++) {
+		int n = min_t(size_t, 243, fw->size - off);
+
+		pkt[0] = 0x31; pkt[1] = 0x00; pkt[2] = 0xf0; pkt[3] = 0xff;
+		pkt[4] = n + 3; pkt[5] = 0x06; pkt[6] = 0x00; pkt[7] = n;
+		memcpy(pkt + 8, fw->data + off, n);
+		reinit_completion(&piano_peri_rx);
+		serdev_device_write(hu->serdev, pkt, 8 + n, MAX_SCHEDULE_TIMEOUT);
+		/* patch TLVs ack only the last segment, NVM TLVs every one */
+		if (wait_for_completion_timeout(&piano_peri_rx,
+				msecs_to_jiffies(off + n >= fw->size ? 1000 : 30))) {
+			acks++;
+			if (acks == 1 || off + n >= fw->size ||
+			    (piano_peri_last_len > 9 && piano_peri_last[9]))
+				bt_dev_info(hdev, "PERI seg %d ack: %*ph", segs,
+					    piano_peri_last_len, piano_peri_last);
+		}
+	}
+	piano_peri_quiet = false;
+	bt_dev_info(hdev, "PERI: %s sent, %d segments, %d acks", fwname, segs, acks);
+	release_firmware(fw);
+	/* collect a trailing notification, if any */
+	if (wait_for_completion_timeout(&piano_peri_rx, msecs_to_jiffies(500)))
+		bt_dev_info(hdev, "PERI after %s: %*ph", fwname,
+			    piano_peri_last_len, piano_peri_last);
+	return 0;
+}
+
 static const struct h4_recv_pkt qca_recv_pkts[] = {
 	{ H4_RECV_ACL,             .recv = qca_recv_acl_data },
 	{ H4_RECV_SCO,             .recv = hci_recv_frame    },
@@ -1288,6 +1399,7 @@ static const struct h4_recv_pkt qca_recv_pkts[] = {
 	{ QCA_IBS_WAKE_IND_EVENT,  .recv = qca_ibs_wake_ind  },
 	{ QCA_IBS_WAKE_ACK_EVENT,  .recv = qca_ibs_wake_ack  },
 	{ QCA_IBS_SLEEP_IND_EVENT, .recv = qca_ibs_sleep_ind },
+	{ QCA_PERI_EVENT,          .recv = qca_recv_peri     },
 };
 
 static int qca_recv(struct hci_uart *hu, const void *data, int count)
@@ -2079,9 +2191,39 @@ retry:
 			goto out;
 	}
 
+	if (soc_type == QCA_WCN7861 && hu->serdev && (piano_peri & 0xb)) {
+		static const u8 act[] = { 0x31, 0x00, 0xf1, 0xff, 0x03, 0x00, 0x01, 0x01 };
+		static const u8 ver[] = { 0x31, 0x00, 0xf0, 0xff, 0x02, 0x05, 0x00 };
+		static const u8 arb[] = { 0x31, 0x00, 0xf0, 0xff, 0x03, 0x08, 0x00, 0x00 };
+
+		if (piano_peri & 1)
+			piano_peri_cmd(hu, "peri-getver", ver, sizeof(ver), 1000);
+		if (piano_peri & 2)
+			piano_peri_cmd(hu, "peri-arbitrate", arb, sizeof(arb), 2000);
+		if (piano_peri & 8) {
+			static const u8 bid[] = { 0x31, 0x00, 0xf0, 0xff, 0x01, 0x0a };
+			static const u8 bld[] = { 0x31, 0x00, 0xf0, 0xff, 0x02, 0x09, 0x00 };
+			static const u8 rst[] = { 0x31, 0x00, 0xf1, 0xff, 0x01, 0x03 };
+
+			if (!piano_peri_tlv(hu, "qca/brhperifw20.tlv")) {
+				piano_peri_cmd(hu, "peri-boardid", bid, sizeof(bid), 1000);
+				piano_peri_tlv(hu, "qca/brhperinv20.bin");
+				piano_peri_cmd(hu, "peri-buildinfo", bld, sizeof(bld), 1000);
+				piano_peri_cmd(hu, "peri-reset", rst, sizeof(rst), 3000);
+				/* patching PERI deactivates the BT subsystem */
+				piano_peri_cmd(hu, "peri-activate-bt", act, sizeof(act), 2000);
+			}
+		}
+	}
+
 	/* Setup patch / NVM configurations */
 	ret = qca_uart_setup(hdev, qca_baudrate, soc_type, ver,
 			firmware_name, rampatch_name);
+	if (!ret && soc_type == QCA_WCN7861 && hu->serdev && (piano_peri & 4)) {
+		static const u8 act[] = { 0x31, 0x00, 0xf1, 0xff, 0x03, 0x00, 0x01, 0x01 };
+
+		piano_peri_cmd(hu, "peri-activate-bt", act, sizeof(act), 2000);
+	}
 	if (!ret) {
 		clear_bit(QCA_IBS_DISABLED, &qca->flags);
 		qca_debugfs_init(hdev);
