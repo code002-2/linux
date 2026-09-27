@@ -245,7 +245,7 @@ static int qca_read_fw_board_id(struct hci_dev *hdev, u16 *bid)
 	}
 
 	*bid = (edl->data[1] << 8) + edl->data[2];
-	bt_dev_dbg(hdev, "%s: bid = %x", __func__, *bid);
+	bt_dev_info(hdev, "QCA board ID: 0x%04x", *bid);
 
 out:
 	kfree_skb(skb);
