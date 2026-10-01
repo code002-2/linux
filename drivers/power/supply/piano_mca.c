@@ -20,7 +20,8 @@
  * charge_policy=1 it raises the input current limit by charger type, with
  * charge_current=1 as well the charge current, and with hv_charge=1 it asks
  * PD sources for 9 V; those are the only
- * properties it ever writes (see piano_mca_write_u32()).  The battery itself
+ * properties it ever writes (see piano_mca_write_u32()).  With pan_ack=1 it
+ * also acknowledges the ADSP's USB-C port notifications.  The battery itself
  * is reported by the two bq27z561 fuel gauges; this driver adds the USB
  * input (presence from the bus voltage, bus current, input current limit and
  * the charger type detected by the ADSP).
@@ -161,6 +162,48 @@ module_param(hv_charge, bool, 0444);
 MODULE_PARM_DESC(hv_charge,
 		 "Ask PD sources with a fixed 9 V PDO for 9 V; needs charge_policy (default: off, 5 V)");
 
+/*
+ * pan_ack: the ADSP reports each USB-C port change (orientation, mux state)
+ * on the USBC_PAN owner and holds its Type-C/PD state machine until the
+ * HLOS acknowledges the notification, up to 13 s each (pan-ack-tmout-ms in
+ * the ADSP device tree).  The mainline altmode driver cannot bind to the
+ * stock pmic_glink node of this board, so nothing acknowledged them and a
+ * PD source attached before the ADSP booted only got its contract 70-80 s
+ * later.  Like the stock altmode-glink driver, this enables the
+ * notifications once the ADSP is up and acknowledges each one; the mux and
+ * orientation are left alone.
+ */
+#define MCA_USBC_CMD_WRITE_REQ	0x15
+#define MCA_USBC_NOTIFY_IND	0x16
+#define MCA_PAN_EN		0x10
+#define MCA_PAN_ACK		0x11
+#define MCA_PAN_MAX_PORTS	3
+#define MCA_PAN_EN_PENDING	BIT(MCA_PAN_MAX_PORTS)
+
+static bool pan_ack;
+module_param(pan_ack, bool, 0444);
+MODULE_PARM_DESC(pan_ack,
+		 "Acknowledge the ADSP's USB-C port notifications (default: off)");
+
+struct mca_usbc_req {
+	struct pmic_glink_hdr hdr;
+	__le32 cmd;
+	__le32 arg;
+	__le32 reserved;
+};
+
+struct mca_usbc_notify {
+	struct pmic_glink_hdr hdr;
+	u8 port_idx;
+	u8 orientation;
+	u8 mux_ctrl;
+	u8 res;
+	__le16 vid;
+	__le16 svid;
+	u8 extended_data[8];
+	__le32 reserved;
+};
+
 enum piano_mca_hv {
 	MCA_HV_OFF,		/* 5 V, may ask for 9 V */
 	MCA_HV_REQUESTED,	/* 9 V asked for, waiting for the bus */
@@ -208,6 +251,12 @@ struct piano_mca {
 	enum piano_mca_hv hv;
 	int hv_polls;
 	unsigned long hv_retry;	/* jiffies before which 9 V is not asked for */
+	struct pmic_glink_client *pan_client;
+	struct work_struct pan_work;
+	struct completion pan_done;
+	spinlock_t pan_lock;		/* pan_pending, pan_stopped */
+	unsigned long pan_pending;	/* ports to acknowledge, MCA_PAN_EN_PENDING */
+	bool pan_stopped;
 	struct dentry *dbg;
 	u32 dbg_prop;
 	u8 dbg_data[MCA_DATA_LEN];
@@ -254,6 +303,123 @@ static void piano_mca_pdr_notify(void *priv, int state)
 	mca->fcc_set_ma = 0;
 	mca->hv = MCA_HV_OFF;
 	mod_delayed_work(system_percpu_wq, &mca->poll, 0);
+}
+
+/* pmic_glink calls back under its client spinlock: requests go from a work */
+static void piano_mca_pan_queue(struct piano_mca *mca, unsigned long bits)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&mca->pan_lock, flags);
+	if (!mca->pan_stopped) {
+		mca->pan_pending |= bits;
+		schedule_work(&mca->pan_work);
+	}
+	spin_unlock_irqrestore(&mca->pan_lock, flags);
+}
+
+static void piano_mca_pan_callback(const void *data, size_t len, void *priv)
+{
+	const struct mca_usbc_notify *msg = data;
+	struct piano_mca *mca = priv;
+
+	switch (le32_to_cpu(msg->hdr.opcode) & 0xff) {
+	case MCA_USBC_CMD_WRITE_REQ:
+		complete(&mca->pan_done);
+		break;
+	case MCA_USBC_NOTIFY_IND:
+		if (len < sizeof(*msg) || msg->port_idx >= MCA_PAN_MAX_PORTS) {
+			dev_warn(mca->dev, "invalid port notification (%zu bytes)\n", len);
+			break;
+		}
+		dev_info(mca->dev, "port %u: orientation %u, mux %u, svid %#x\n",
+			 msg->port_idx, msg->orientation, msg->mux_ctrl,
+			 le16_to_cpu(msg->svid));
+		piano_mca_pan_queue(mca, BIT(msg->port_idx));
+		break;
+	}
+}
+
+static void piano_mca_pan_pdr_notify(void *priv, int state)
+{
+	struct piano_mca *mca = priv;
+
+	if (state == SERVREG_SERVICE_STATE_UP)
+		piano_mca_pan_queue(mca, MCA_PAN_EN_PENDING);
+}
+
+static void piano_mca_pan_request(struct piano_mca *mca, u32 cmd, u32 arg)
+{
+	struct mca_usbc_req req = {
+		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_USBC_PAN),
+		.hdr.type = cpu_to_le32(PMIC_GLINK_REQ_RESP),
+		.hdr.opcode = cpu_to_le32(MCA_USBC_CMD_WRITE_REQ),
+		.cmd = cpu_to_le32(cmd),
+		.arg = cpu_to_le32(arg),
+	};
+	int ret;
+
+	/* The ack does not name the request: one at a time, from the work */
+	reinit_completion(&mca->pan_done);
+	ret = pmic_glink_send(mca->pan_client, &req, sizeof(req));
+	if (!ret && !wait_for_completion_timeout(&mca->pan_done,
+						 msecs_to_jiffies(1000)))
+		ret = -ETIMEDOUT;
+	if (ret)
+		dev_warn(mca->dev, "port request %#x(%u) failed: %d\n", cmd, arg, ret);
+}
+
+static void piano_mca_pan_work(struct work_struct *work)
+{
+	struct piano_mca *mca = container_of(work, struct piano_mca, pan_work);
+	unsigned long flags, pending;
+	unsigned int port;
+
+	spin_lock_irqsave(&mca->pan_lock, flags);
+	pending = mca->pan_pending;
+	mca->pan_pending = 0;
+	spin_unlock_irqrestore(&mca->pan_lock, flags);
+
+	if (pending & MCA_PAN_EN_PENDING)
+		piano_mca_pan_request(mca, MCA_PAN_EN, 0);
+	for_each_set_bit(port, &pending, MCA_PAN_MAX_PORTS)
+		piano_mca_pan_request(mca, MCA_PAN_ACK, port);
+}
+
+/* Runs before the client is freed: nothing is queued once it returns */
+static void piano_mca_pan_stop(void *data)
+{
+	struct piano_mca *mca = data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&mca->pan_lock, flags);
+	mca->pan_stopped = true;
+	spin_unlock_irqrestore(&mca->pan_lock, flags);
+	cancel_work_sync(&mca->pan_work);
+}
+
+static int piano_mca_pan_init(struct piano_mca *mca)
+{
+	struct device *dev = mca->dev;
+	int ret;
+
+	INIT_WORK(&mca->pan_work, piano_mca_pan_work);
+	init_completion(&mca->pan_done);
+	spin_lock_init(&mca->pan_lock);
+
+	mca->pan_client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_USBC_PAN,
+						       piano_mca_pan_callback,
+						       piano_mca_pan_pdr_notify,
+						       mca);
+	if (IS_ERR(mca->pan_client))
+		return PTR_ERR(mca->pan_client);
+
+	ret = devm_add_action_or_reset(dev, piano_mca_pan_stop, mca);
+	if (ret)
+		return ret;
+
+	pmic_glink_client_register(mca->pan_client);
+	return 0;
 }
 
 /*
@@ -924,6 +1090,9 @@ static int piano_mca_probe(struct auxiliary_device *adev,
 	devm_add_action_or_reset(dev, piano_mca_dbg_remove, mca->dbg);
 
 	pmic_glink_client_register(mca->client);
+
+	if (pan_ack)
+		return piano_mca_pan_init(mca);
 	return 0;
 }
 
