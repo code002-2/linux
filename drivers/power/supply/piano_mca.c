@@ -114,9 +114,6 @@ static const char * const mca_real_type_names[MCA_TYPE_MAX] = {
 #define MCA_ICL_MIN_MA		100	/* also the ADSP power-on value */
 #define MCA_ICL_MAX_MA		1500
 #define MCA_ICL_DEFAULT_MA	500
-/* Battery temperature window (degC) outside which the limit is not raised */
-#define MCA_POLICY_TBAT_MIN	15
-#define MCA_POLICY_TBAT_MAX	45
 
 static bool charge_policy;
 module_param(charge_policy, bool, 0444);
@@ -128,14 +125,22 @@ MODULE_PARM_DESC(charge_policy,
  * whatever the source.  Stock sets the charge current by charger type (its
  * buck strategy chg_* values) and a JEITA table that allows far more than
  * the ceiling below between 13 and 48 degC; this sets the charger-type value,
- * capped, and only inside a narrower temperature window.  Detach, unbind and
+ * capped.  Temperature only ever moves the charge current, never the input
+ * limit or the bus voltage, so the system keeps running from the source:
+ * above MCA_FCC_DERATE_FROM the current steps down by MCA_FCC_DERATE_STEP_MA
+ * per degree to the fallback value, and comes back one step at a time, once
+ * the battery is a degree cooler than that step needs and at most every
+ * MCA_FCC_RAISE_MS.  Below MCA_FCC_TBAT_MIN it is the fallback value.  The
+ * ADSP's own JEITA window (0-55 degC) still applies.  Detach, unbind and
  * ADSP restarts put the fallback value back.
  */
 #define MCA_FCC_MIN_MA		100
 #define MCA_FCC_MAX_MA		2000
 #define MCA_FCC_DEFAULT_MA	500
 #define MCA_FCC_TBAT_MIN	15
-#define MCA_FCC_TBAT_MAX	40
+#define MCA_FCC_DERATE_FROM	38
+#define MCA_FCC_DERATE_STEP_MA	300
+#define MCA_FCC_RAISE_MS	30000
 
 static bool charge_current;
 module_param(charge_current, bool, 0444);
@@ -144,10 +149,10 @@ MODULE_PARM_DESC(charge_current,
 
 /*
  * hv_charge: a PD source with a fixed 9 V PDO is asked for 9 V, as the
- * stock buck strategy does.  The bus has to settle within the window below
- * in a few polls and stay there; otherwise, or when the battery leaves the
- * narrower 9 V temperature window, the source goes back to 5 V until it is
- * detached.
+ * stock buck strategy does, whatever the battery temperature (that is left
+ * to the charge current).  The bus has to settle within the window below in
+ * a few polls and stay there; otherwise the source goes back to 5 V until
+ * it is detached.
  */
 #define MCA_HV_MV		9000
 #define MCA_HV_VBUS_MIN_UV	8000000
@@ -155,7 +160,6 @@ MODULE_PARM_DESC(charge_current,
 #define MCA_HV_SETTLE_POLLS	3
 /* A source that drops the bus while 9 V is pending is left alone this long */
 #define MCA_HV_RETRY_MS		60000
-#define MCA_HV_TBAT_MAX		40
 
 static bool hv_charge;
 module_param(hv_charge, bool, 0444);
@@ -248,6 +252,8 @@ struct piano_mca {
 	u32 real_type;
 	int icl_set_ma;		/* last limit written by charge_policy, 0 if none */
 	int fcc_set_ma;		/* last current written by charge_current, 0 if none */
+	u32 fcc_full;		/* charger-type current fcc_set_ma was derived from */
+	unsigned long fcc_raise_at;	/* jiffies before which it is not raised */
 	enum piano_mca_hv hv;
 	int hv_polls;
 	unsigned long hv_retry;	/* jiffies before which 9 V is not asked for */
@@ -609,13 +615,35 @@ static u32 piano_mca_policy_fcc(u32 real_type)
 	}
 }
 
+/* Charge current for @full at battery temperature @tbat */
+static u32 piano_mca_fcc_thermal(u32 full, int tbat)
+{
+	u32 derate;
+
+	if (tbat < MCA_FCC_TBAT_MIN)
+		return MCA_FCC_DEFAULT_MA;
+	if (tbat <= MCA_FCC_DERATE_FROM || full <= MCA_FCC_DEFAULT_MA)
+		return full;
+
+	derate = (tbat - MCA_FCC_DERATE_FROM) * MCA_FCC_DERATE_STEP_MA;
+	return derate < full - MCA_FCC_DEFAULT_MA ? full - derate :
+						     MCA_FCC_DEFAULT_MA;
+}
+
 static void piano_mca_apply_fcc(struct piano_mca *mca, int tbat)
 {
-	u32 target = min_t(u32, piano_mca_policy_fcc(mca->real_type),
-			   MCA_FCC_MAX_MA);
+	u32 full = min_t(u32, piano_mca_policy_fcc(mca->real_type),
+			 MCA_FCC_MAX_MA);
+	u32 target = piano_mca_fcc_thermal(full, tbat);
 
-	if (tbat < MCA_FCC_TBAT_MIN || tbat > MCA_FCC_TBAT_MAX)
-		target = MCA_FCC_DEFAULT_MA;
+	/* Same charger, cooling down: one step at a time, with a degree spare */
+	if (mca->fcc_set_ma && full == mca->fcc_full &&
+	    target > mca->fcc_set_ma) {
+		if (time_before(jiffies, mca->fcc_raise_at))
+			return;
+		target = min3(target, piano_mca_fcc_thermal(full, tbat + 1),
+			      (u32)mca->fcc_set_ma + MCA_FCC_DERATE_STEP_MA);
+	}
 	if (target == mca->fcc_set_ma)
 		return;
 
@@ -627,6 +655,8 @@ static void piano_mca_apply_fcc(struct piano_mca *mca, int tbat)
 	dev_info(mca->dev, "%s: charge current %u mA (battery %d degC)\n",
 		 piano_mca_type_name(mca->real_type) ?: "Unknown", target, tbat);
 	mca->fcc_set_ma = target;
+	mca->fcc_full = full;
+	mca->fcc_raise_at = jiffies + msecs_to_jiffies(MCA_FCC_RAISE_MS);
 }
 
 static bool piano_mca_is_pd(u32 real_type)
@@ -657,7 +687,7 @@ static u32 piano_mca_pd_9v_ma(struct piano_mca *mca)
  * hv_charge state machine, one step per poll.  Returns the input current
  * the source allows at 9 V once the bus is there, 0 while at 5 V.
  */
-static u32 piano_mca_hv_step(struct piano_mca *mca, int tbat)
+static u32 piano_mca_hv_step(struct piano_mca *mca)
 {
 	bool vbus_hv = mca->vbus_uv >= MCA_HV_VBUS_MIN_UV &&
 		       mca->vbus_uv <= MCA_HV_VBUS_MAX_UV;
@@ -667,7 +697,6 @@ static u32 piano_mca_hv_step(struct piano_mca *mca, int tbat)
 		return 0;
 
 	if (piano_mca_is_pd(mca->real_type) &&
-	    tbat >= MCA_POLICY_TBAT_MIN && tbat <= MCA_HV_TBAT_MAX &&
 	    !piano_mca_read_u32(mca, MCA_PROP_VERIFY_PROCESS))
 		ma = piano_mca_pd_9v_ma(mca);
 
@@ -698,9 +727,8 @@ static u32 piano_mca_hv_step(struct piano_mca *mca, int tbat)
 		return 0;
 	}
 
-	/* Not reached, dropped, too warm or refused: 5 V until detach */
-	dev_info(mca->dev, "back to 5 V (bus %d mV, battery %d degC)\n",
-		 mca->vbus_uv / 1000, tbat);
+	/* Not reached, dropped or refused: 5 V until detach */
+	dev_info(mca->dev, "back to 5 V (bus %d mV)\n", mca->vbus_uv / 1000);
 	piano_mca_write_u32(mca, MCA_PROP_PD_FIXED_VOLT, 5000);
 	mca->hv = MCA_HV_BLOCKED;
 	return 0;
@@ -709,9 +737,9 @@ static u32 piano_mca_hv_step(struct piano_mca *mca, int tbat)
 /*
  * charge_policy: raise the input current limit to what the detected charger
  * type allows, never above what a PD source advertises at the voltage in
- * use, and only within the battery temperature window.  Charge current and
- * JEITA stay with the ADSP, and its AICL still backs the limit off if the
- * source sags.
+ * use.  It does not follow the battery temperature (charge_current does), so
+ * a warm battery is not left to carry the system; JEITA stays with the ADSP,
+ * and its AICL still backs the limit off if the source sags.
  */
 static void piano_mca_apply_policy(struct piano_mca *mca)
 {
@@ -723,13 +751,11 @@ static void piano_mca_apply_policy(struct piano_mca *mca)
 	if (charge_current)
 		piano_mca_apply_fcc(mca, tbat);
 
-	hv_ma = piano_mca_hv_step(mca, tbat);
+	hv_ma = piano_mca_hv_step(mca);
 	if (hv_ma)
 		target = clamp(hv_ma, MCA_ICL_MIN_MA, target);
 	else if (piano_mca_is_pd(mca->real_type))
 		target = clamp(piano_mca_pd_5v_ma(mca), MCA_ICL_MIN_MA, target);
-	if (tbat < MCA_POLICY_TBAT_MIN || tbat > MCA_POLICY_TBAT_MAX)
-		target = MCA_ICL_DEFAULT_MA;
 
 	if (target == mca->icl_set_ma)
 		return;
