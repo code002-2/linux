@@ -208,6 +208,16 @@ config BATTERY_PMU
 	  Say Y here to expose battery information on Apple machines
 	  through the generic battery class.
 
+config BATTERY_PIANO_MCA
+	tristate "Xiaomi MCA ADSP charger/battery telemetry (Pad 8 Pro)"
+	depends on QCOM_PMIC_GLINK
+	help
+	  Say Y here to enable telemetry from the Xiaomi Pad 8 Pro charger
+	  stack, which the ADSP firmware exposes through Xiaomi's MCA property
+	  protocol on the PMIC GLINK battery channel instead of the standard
+	  Qualcomm battery manager protocol.  Replaces the battmgr driver on
+	  that board.
+
 config BATTERY_QCOM_BATTMGR
 	tristate "Qualcomm PMIC GLINK battery manager support"
 	depends on QCOM_PMIC_GLINK

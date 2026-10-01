@@ -882,6 +882,7 @@ static int apm_probe(gpr_device_t *gdev)
 	idr_init(&apm->modules_idr);
 
 	g_apm = apm;
+	audioreach_set_apm_src_port(gdev->svc_id);
 
 	q6apm_get_apm_state(apm);
 
