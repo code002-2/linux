@@ -10195,6 +10195,13 @@ F:	Documentation/devicetree/bindings/sound/foursemi,fs2105s.yaml
 F:	sound/soc/codecs/fs-amp-lib.*
 F:	sound/soc/codecs/fs210x.*
 
+FOURSEMI FS19XX AMPLIFIER DRIVER
+M:	bluseliu50 <265648257+bluseliu50@users.noreply.github.com>
+L:	linux-sound@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/sound/foursemi,fs19xx.yaml
+F:	sound/soc/codecs/fs19xx.c
+
 FPGA DFL DRIVERS
 M:	Xu Yilun <yilun.xu@intel.com>
 R:	Tom Rix <trix@redhat.com>
