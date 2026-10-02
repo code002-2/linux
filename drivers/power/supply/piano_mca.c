@@ -19,9 +19,10 @@
  * voltage 4350 mV, charge current 3000 mA, JEITA window 0-55 degC).  With
  * charge_policy=1 it raises the input current limit by charger type, with
  * charge_current=1 as well the charge current, and with hv_charge=1 it asks
- * PD sources for 9 V; those are the only
- * properties it ever writes (see piano_mca_write_u32()).  With pan_ack=1 it
- * also acknowledges the ADSP's USB-C port notifications.  The battery itself
+ * PD sources for 9 V; with mipps_auth=1 it relays the Xiaomi charger
+ * authentication (MiPPS) messages for userspace.  piano_mca_write_allowed()
+ * lists every property it can write.  With pan_ack=1 it also acknowledges
+ * the ADSP's USB-C port notifications.  The battery itself
  * is reported by the two bq27z561 fuel gauges; this driver adds the USB
  * input (presence from the bus voltage, bus current, input current limit and
  * the charger type detected by the ADSP).
@@ -30,10 +31,12 @@
 #include <linux/auxiliary_bus.h>
 #include <linux/completion.h>
 #include <linux/debugfs.h>
+#include <linux/hex.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/power_supply.h>
 #include <linux/seq_file.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #include <linux/soc/qcom/pdr.h>
 #include <linux/soc/qcom/pmic_glink.h>
@@ -61,6 +64,30 @@ struct piano_mca_pdo {
 	__le32 max_mv;
 	__le32 max_ma;
 };
+
+/*
+ * Xiaomi charger authentication (MiPPS): the ADSP exchanges the PD
+ * unstructured VDMs with the adapter, userspace computes the digests.
+ * Command n (1-8) goes to property 0x21003 + n - 1, as in the stock
+ * adsp_pd_protocol_request_vdm_cmd().
+ */
+#define MCA_PROP_VDM_BASE	0x21003
+#define MCA_PROP_VDM_VERSION	0x21003
+#define MCA_PROP_VDM_VOLTAGE	0x21004
+#define MCA_PROP_VDM_TEMP	0x21005
+#define MCA_PROP_VDM_SEED	0x21006
+#define MCA_PROP_VDM_AUTH	0x21007
+#define MCA_PROP_VDM_VERIFIED	0x21008
+#define MCA_PROP_VDM_REMOVE_COMP 0x21009
+#define MCA_PROP_VDM_REVERSE	0x2100a
+#define MCA_PROP_DATA_ROLE	0x2100c	/* 1 UFP, 2 DFP; write asks a swap */
+#define MCA_PROP_ADAPTER_ID	0x2100e
+#define MCA_PROP_ADAPTER_SVID	0x2100f
+#define MCA_PROP_PD_VERIFIED	0x21010
+#define MCA_PROP_UVDM_STATE	0x21012
+#define MCA_VDM_LEN		16
+#define MCA_DATA_ROLE_UFP	1
+#define MCA_DATA_ROLE_DFP	2
 
 /*
  * Charger types as named by the stock sysfs "real_type" table; 13 and 16
@@ -160,6 +187,14 @@ MODULE_PARM_DESC(charge_current,
 #define MCA_HV_SETTLE_POLLS	3
 /* A source that drops the bus while 9 V is pending is left alone this long */
 #define MCA_HV_RETRY_MS		60000
+/*
+ * A source that goes back to 5 V by itself once 9 V was reached (a Xiaomi
+ * charger does after the adapter authentication) is asked again after a
+ * pause, a few times per attach.
+ */
+#define MCA_HV_VBUS_5V_MAX_UV	6000000
+#define MCA_HV_RENEG_MS		10000
+#define MCA_HV_RENEG_MAX	3
 
 static bool hv_charge;
 module_param(hv_charge, bool, 0444);
@@ -183,6 +218,11 @@ MODULE_PARM_DESC(hv_charge,
 #define MCA_PAN_ACK		0x11
 #define MCA_PAN_MAX_PORTS	3
 #define MCA_PAN_EN_PENDING	BIT(MCA_PAN_MAX_PORTS)
+
+static bool mipps_auth;
+module_param(mipps_auth, bool, 0444);
+MODULE_PARM_DESC(mipps_auth,
+		 "Expose the Xiaomi charger authentication (MiPPS) messages to userspace (default: off)");
 
 static bool pan_ack;
 module_param(pan_ack, bool, 0444);
@@ -256,6 +296,7 @@ struct piano_mca {
 	unsigned long fcc_raise_at;	/* jiffies before which it is not raised */
 	enum piano_mca_hv hv;
 	int hv_polls;
+	int hv_renegs;		/* times the source went back to 5 V on its own */
 	unsigned long hv_retry;	/* jiffies before which 9 V is not asked for */
 	struct pmic_glink_client *pan_client;
 	struct work_struct pan_work;
@@ -308,6 +349,7 @@ static void piano_mca_pdr_notify(void *priv, int state)
 	mca->icl_set_ma = 0;
 	mca->fcc_set_ma = 0;
 	mca->hv = MCA_HV_OFF;
+	mca->hv_renegs = 0;
 	mod_delayed_work(system_percpu_wq, &mca->poll, 0);
 }
 
@@ -483,32 +525,63 @@ static int piano_mca_read(struct piano_mca *mca, u32 prop, void *buf, size_t len
 }
 
 /*
- * The only write path.  Every property it accepts is listed here with its
- * allowed range; anything else (float voltage, charge current, ship mode,
- * boost, ...) is refused, whatever the caller.
+ * Every property this driver may write, with its payload length and range.
+ * Anything else (float voltage, ship mode, boost, ...) is refused, whatever
+ * the caller.
  */
+static bool piano_mca_write_allowed(u32 prop, const void *data, size_t len)
+{
+	u32 val = len == sizeof(u32) ? get_unaligned_le32(data) : 0;
+
+	switch (prop) {
+	case MCA_PROP_ICL:
+		return len == sizeof(u32) &&
+		       val >= MCA_ICL_MIN_MA && val <= MCA_ICL_MAX_MA;
+	case MCA_PROP_FCC:
+		return charge_current && len == sizeof(u32) &&
+		       val >= MCA_FCC_MIN_MA && val <= MCA_FCC_MAX_MA;
+	case MCA_PROP_PD_FIXED_VOLT:
+		return hv_charge && len == sizeof(u32) &&
+		       (val == 5000 || val == MCA_HV_MV);
+	case MCA_PROP_VDM_VERSION:
+	case MCA_PROP_VDM_VOLTAGE:
+	case MCA_PROP_VDM_TEMP:
+		return mipps_auth && len == sizeof(u32);
+	case MCA_PROP_VDM_SEED:
+	case MCA_PROP_VDM_AUTH:
+	case MCA_PROP_VDM_REVERSE:
+		return mipps_auth && len == MCA_VDM_LEN;
+	case MCA_PROP_DATA_ROLE:
+		return mipps_auth && len == sizeof(u32) &&
+		       (val == MCA_DATA_ROLE_UFP || val == MCA_DATA_ROLE_DFP);
+	case MCA_PROP_VDM_VERIFIED:
+	case MCA_PROP_VDM_REMOVE_COMP:
+	case MCA_PROP_PD_VERIFIED:
+	case MCA_PROP_VERIFY_PROCESS:
+		return mipps_auth && len == sizeof(u32) && val <= 1;
+	default:
+		return false;
+	}
+}
+
+/* The only write path */
+static int piano_mca_write(struct piano_mca *mca, u32 prop, const void *data,
+			   size_t len)
+{
+	u8 buf[MCA_VDM_LEN];
+
+	if (len > sizeof(buf) || !piano_mca_write_allowed(prop, data, len))
+		return -EPERM;
+
+	memcpy(buf, data, len);
+	return piano_mca_xfer(mca, MCA_OP_WRITE, prop, buf, len);
+}
+
 static int piano_mca_write_u32(struct piano_mca *mca, u32 prop, u32 val)
 {
 	__le32 data = cpu_to_le32(val);
 
-	switch (prop) {
-	case MCA_PROP_ICL:
-		if (val < MCA_ICL_MIN_MA || val > MCA_ICL_MAX_MA)
-			return -ERANGE;
-		break;
-	case MCA_PROP_FCC:
-		if (!charge_current || val < MCA_FCC_MIN_MA || val > MCA_FCC_MAX_MA)
-			return -EPERM;
-		break;
-	case MCA_PROP_PD_FIXED_VOLT:
-		if (!hv_charge || (val != 5000 && val != MCA_HV_MV))
-			return -EPERM;
-		break;
-	default:
-		return -EPERM;
-	}
-
-	return piano_mca_xfer(mca, MCA_OP_WRITE, prop, &data, sizeof(data));
+	return piano_mca_write(mca, prop, &data, sizeof(data));
 }
 
 static u32 piano_mca_read_u32(struct piano_mca *mca, u32 prop)
@@ -692,20 +765,26 @@ static u32 piano_mca_hv_step(struct piano_mca *mca)
 	bool vbus_hv = mca->vbus_uv >= MCA_HV_VBUS_MIN_UV &&
 		       mca->vbus_uv <= MCA_HV_VBUS_MAX_UV;
 	u32 ma = 0;
+	int ret;
 
 	if (!hv_charge || mca->hv == MCA_HV_BLOCKED)
 		return 0;
 
-	if (piano_mca_is_pd(mca->real_type) &&
-	    !piano_mca_read_u32(mca, MCA_PROP_VERIFY_PROCESS))
+	if (piano_mca_is_pd(mca->real_type))
 		ma = piano_mca_pd_9v_ma(mca);
 
 	switch (mca->hv) {
 	case MCA_HV_OFF:
-		if (!ma || time_before(jiffies, mca->hv_retry))
+		/* not in the middle of an adapter authentication */
+		if (!ma || time_before(jiffies, mca->hv_retry) ||
+		    piano_mca_read_u32(mca, MCA_PROP_VERIFY_PROCESS))
 			return 0;
-		if (piano_mca_write_u32(mca, MCA_PROP_PD_FIXED_VOLT, MCA_HV_MV))
+		ret = piano_mca_write_u32(mca, MCA_PROP_PD_FIXED_VOLT, MCA_HV_MV);
+		if (ret) {
+			dev_warn(mca->dev, "9 V request refused: %d (adsp %d)\n",
+				 ret, mca->retcode);
 			break;
+		}
 		dev_info(mca->dev, "requested 9 V (PDO %u mA)\n", ma);
 		mca->hv = MCA_HV_REQUESTED;
 		mca->hv_polls = 0;
@@ -722,6 +801,14 @@ static u32 piano_mca_hv_step(struct piano_mca *mca)
 	case MCA_HV_ON:
 		if (ma && vbus_hv)
 			return ma;
+		if (ma && mca->vbus_uv < MCA_HV_VBUS_5V_MAX_UV &&
+		    mca->hv_renegs++ < MCA_HV_RENEG_MAX) {
+			dev_info(mca->dev, "source back at 5 V, asking again in %u s\n",
+				 MCA_HV_RENEG_MS / 1000);
+			mca->hv = MCA_HV_OFF;
+			mca->hv_retry = jiffies + msecs_to_jiffies(MCA_HV_RENEG_MS);
+			return 0;
+		}
 		break;
 	default:
 		return 0;
@@ -805,6 +892,7 @@ static void piano_mca_poll(struct work_struct *work)
 		if (mca->hv == MCA_HV_REQUESTED)
 			mca->hv_retry = jiffies + msecs_to_jiffies(MCA_HV_RETRY_MS);
 		mca->hv = MCA_HV_OFF;
+		mca->hv_renegs = 0;
 	} else if (charge_policy) {
 		piano_mca_apply_policy(mca);
 	}
@@ -916,7 +1004,274 @@ static struct attribute *piano_mca_usb_attrs[] = {
 	&dev_attr_charger_type.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(piano_mca_usb);
+
+static const struct attribute_group piano_mca_usb_group = {
+	.attrs = piano_mca_usb_attrs,
+};
+
+/*
+ * MiPPS relay, in the format of the sheng battmgr "xiaomi" nodes that the
+ * xiaomi-mipps-auth tool drives:
+ *
+ *   request_vdm_cmd  write "<cmd>[,<hex>]": 1-3 query the adapter, 4, 5
+ *                    and 8 send 16 bytes (seed, challenge, reverse digest),
+ *                    6 and 7 send a 4-byte flag; read "<state>,<result>"
+ *   adapter_id, adapter_svid, pdo2, real_type, pd_verifed
+ *   verify_process   1 while an authentication runs, as stock batterysecret
+ *                    sets it; 9 V is not newly asked for meanwhile
+ *   data_role        "ufp" or "dfp"; writing asks the adapter for a PD data
+ *                    role swap (stock request_vdm_cmd 200), as the ADSP
+ *                    reads the adapter identity only as DFP
+ */
+static struct piano_mca *piano_mca_from_dev(struct device *dev)
+{
+	return power_supply_get_drvdata(to_power_supply(dev));
+}
+
+static ssize_t request_vdm_cmd_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct piano_mca *mca = piano_mca_from_dev(dev);
+	__le32 auth[MCA_VDM_LEN / sizeof(__le32)];
+	__le32 val;
+	u32 state;
+	int ret;
+
+	ret = piano_mca_read(mca, MCA_PROP_UVDM_STATE, &val, sizeof(val));
+	if (ret)
+		return ret;
+	state = le32_to_cpu(val);
+
+	switch (state) {
+	case 1 ... 3:
+		ret = piano_mca_read(mca, MCA_PROP_VDM_BASE + state - 1,
+				     &val, sizeof(val));
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%u,%u\n", state, le32_to_cpu(val));
+	case 5:
+		ret = piano_mca_read(mca, MCA_PROP_VDM_AUTH, auth, sizeof(auth));
+		if (ret)
+			return ret;
+		return sysfs_emit(buf, "%u,%08x%08x%08x%08x\n", state,
+				  le32_to_cpu(auth[0]), le32_to_cpu(auth[1]),
+				  le32_to_cpu(auth[2]), le32_to_cpu(auth[3]));
+	default:
+		return sysfs_emit(buf, "%u,Null\n", state);
+	}
+}
+
+static ssize_t request_vdm_cmd_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct piano_mca *mca = piano_mca_from_dev(dev);
+	__le32 data[MCA_VDM_LEN / sizeof(__le32)] = {};
+	u8 bytes[MCA_VDM_LEN];
+	char hex[2 * MCA_VDM_LEN + 1] = {};
+	unsigned int cmd;
+	size_t len;
+	int i, ret;
+
+	if (sscanf(buf, "%u,%32s", &cmd, hex) < 1)
+		return -EINVAL;
+
+	switch (cmd) {
+	case 1 ... 3:
+		len = sizeof(u32);
+		break;
+	case 4:
+	case 5:
+	case 8:
+		/* the adapter takes the 16 bytes as big-endian words */
+		if (strlen(hex) != 2 * MCA_VDM_LEN ||
+		    hex2bin(bytes, hex, MCA_VDM_LEN))
+			return -EINVAL;
+		for (i = 0; i < ARRAY_SIZE(data); i++)
+			data[i] = cpu_to_le32(get_unaligned_be32(&bytes[4 * i]));
+		len = MCA_VDM_LEN;
+		break;
+	case 6:
+	case 7:
+		if (strlen(hex) != 2 * sizeof(u32) ||
+		    hex2bin(bytes, hex, sizeof(u32)))
+			return -EINVAL;
+		data[0] = cpu_to_le32(get_unaligned_le32(bytes));
+		len = sizeof(u32);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = piano_mca_write(mca, MCA_PROP_VDM_BASE + cmd - 1, data, len);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_RW(request_vdm_cmd);
+
+static ssize_t piano_mca_show_u32(struct device *dev, char *buf, u32 prop,
+				  const char *fmt)
+{
+	__le32 val;
+	int ret;
+
+	ret = piano_mca_read(piano_mca_from_dev(dev), prop, &val, sizeof(val));
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, fmt, le32_to_cpu(val));
+}
+
+static ssize_t piano_mca_store_flag(struct device *dev, const char *buf,
+				    size_t count, u32 prop)
+{
+	bool flag;
+	int ret;
+
+	if (kstrtobool(buf, &flag))
+		return -EINVAL;
+
+	ret = piano_mca_write_u32(piano_mca_from_dev(dev), prop, flag);
+	return ret ? ret : count;
+}
+
+static ssize_t adapter_id_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	return piano_mca_show_u32(dev, buf, MCA_PROP_ADAPTER_ID, "%08x\n");
+}
+static DEVICE_ATTR_RO(adapter_id);
+
+static ssize_t adapter_svid_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	return piano_mca_show_u32(dev, buf, MCA_PROP_ADAPTER_SVID, "%04x\n");
+}
+static DEVICE_ATTR_RO(adapter_svid);
+
+/*
+ * Maximum voltage of the second source PDO, zero when the adapter offers
+ * only 5 V.  Stock tests the same field before starting authentication.
+ */
+static ssize_t pdo2_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
+{
+	struct piano_mca_pdo pdos[MCA_PD_MAX_PDOS];
+	int ret;
+
+	ret = piano_mca_read(piano_mca_from_dev(dev), MCA_PROP_PDOS, pdos,
+			     sizeof(pdos));
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "%08x\n", le32_to_cpu(pdos[1].max_mv));
+}
+static DEVICE_ATTR_RO(pdo2);
+
+static ssize_t real_type_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	return charger_type_show(dev, attr, buf);
+}
+static DEVICE_ATTR_RO(real_type);
+
+static ssize_t pd_verifed_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	return piano_mca_show_u32(dev, buf, MCA_PROP_PD_VERIFIED, "%u\n");
+}
+
+static ssize_t pd_verifed_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	return piano_mca_store_flag(dev, buf, count, MCA_PROP_PD_VERIFIED);
+}
+static DEVICE_ATTR_RW(pd_verifed);
+
+static ssize_t verify_process_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	return piano_mca_show_u32(dev, buf, MCA_PROP_VERIFY_PROCESS, "%u\n");
+}
+
+static ssize_t verify_process_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	return piano_mca_store_flag(dev, buf, count, MCA_PROP_VERIFY_PROCESS);
+}
+static DEVICE_ATTR_RW(verify_process);
+
+static ssize_t data_role_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	__le32 val;
+	int ret;
+
+	ret = piano_mca_read(piano_mca_from_dev(dev), MCA_PROP_DATA_ROLE, &val,
+			     sizeof(val));
+	if (ret)
+		return ret;
+
+	switch (le32_to_cpu(val)) {
+	case MCA_DATA_ROLE_UFP:
+		return sysfs_emit(buf, "ufp\n");
+	case MCA_DATA_ROLE_DFP:
+		return sysfs_emit(buf, "dfp\n");
+	default:
+		return sysfs_emit(buf, "none\n");
+	}
+}
+
+static ssize_t data_role_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	u32 role;
+	int ret;
+
+	if (sysfs_streq(buf, "ufp"))
+		role = MCA_DATA_ROLE_UFP;
+	else if (sysfs_streq(buf, "dfp"))
+		role = MCA_DATA_ROLE_DFP;
+	else
+		return -EINVAL;
+
+	ret = piano_mca_write_u32(piano_mca_from_dev(dev), MCA_PROP_DATA_ROLE,
+				  role);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_RW(data_role);
+
+static struct attribute *piano_mca_xiaomi_attrs[] = {
+	&dev_attr_request_vdm_cmd.attr,
+	&dev_attr_adapter_id.attr,
+	&dev_attr_adapter_svid.attr,
+	&dev_attr_pdo2.attr,
+	&dev_attr_real_type.attr,
+	&dev_attr_pd_verifed.attr,
+	&dev_attr_verify_process.attr,
+	&dev_attr_data_role.attr,
+	NULL,
+};
+
+static umode_t piano_mca_xiaomi_visible(struct kobject *kobj,
+					struct attribute *attr, int n)
+{
+	return mipps_auth ? attr->mode : 0;
+}
+
+static const struct attribute_group piano_mca_xiaomi_group = {
+	.name = "xiaomi",
+	.attrs = piano_mca_xiaomi_attrs,
+	.is_visible = piano_mca_xiaomi_visible,
+};
+
+static const struct attribute_group *piano_mca_usb_groups[] = {
+	&piano_mca_usb_group,
+	&piano_mca_xiaomi_group,
+	NULL,
+};
 
 /* The gauges re-read their status as soon as the input changes */
 static char *piano_mca_supplied_to[] = { "bq27z561-0", "bq27z561-1" };
