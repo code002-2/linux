@@ -141,6 +141,7 @@ static const char * const mca_real_type_names[MCA_TYPE_MAX] = {
 /* Input current limits (mA) set by charge_policy, from the stock tables */
 #define MCA_ICL_MIN_MA		100	/* also the ADSP power-on value */
 #define MCA_ICL_MAX_MA		1500
+#define MCA_ICL_HV_MAX_MA	2500	/* at 9 V, see piano_mca_hv_icl() */
 #define MCA_ICL_DEFAULT_MA	500
 
 static bool charge_policy;
@@ -163,7 +164,7 @@ MODULE_PARM_DESC(charge_policy,
  * ADSP restarts put the fallback value back.
  */
 #define MCA_FCC_MIN_MA		100
-#define MCA_FCC_MAX_MA		2000
+#define MCA_FCC_MAX_MA		3000	/* the ADSP's own nominal value */
 #define MCA_FCC_DEFAULT_MA	500
 #define MCA_FCC_TBAT_MIN	15
 #define MCA_FCC_DERATE_FROM	38
@@ -559,7 +560,7 @@ static bool piano_mca_write_allowed(u32 prop, const void *data, size_t len)
 	switch (prop) {
 	case MCA_PROP_ICL:
 		return len == sizeof(u32) &&
-		       val >= MCA_ICL_MIN_MA && val <= MCA_ICL_MAX_MA;
+		       val >= MCA_ICL_MIN_MA && val <= MCA_ICL_HV_MAX_MA;
 	case MCA_PROP_FCC:
 		return charge_current && len == sizeof(u32) &&
 		       val >= MCA_FCC_MIN_MA && val <= MCA_FCC_MAX_MA;
@@ -883,6 +884,15 @@ static u32 piano_mca_hv_step(struct piano_mca *mca)
 }
 
 /*
+ * Stock buck strategy input current limits (mA) at 9 V: in_pd, and in_pps
+ * for the two types the stock table names PD_PPS
+ */
+static u32 piano_mca_hv_icl(u32 real_type)
+{
+	return real_type == MCA_TYPE_PD ? 1600 : MCA_ICL_HV_MAX_MA;
+}
+
+/*
  * charge_policy: raise the input current limit to what the detected charger
  * type allows, never above what a PD source advertises at the voltage in
  * use.  It does not follow the battery temperature (charge_current does), so
@@ -901,7 +911,8 @@ static void piano_mca_apply_policy(struct piano_mca *mca)
 
 	hv_ma = piano_mca_hv_step(mca);
 	if (hv_ma)
-		target = clamp(hv_ma, MCA_ICL_MIN_MA, target);
+		target = clamp(hv_ma, MCA_ICL_MIN_MA,
+			       piano_mca_hv_icl(mca->real_type));
 	else if (piano_mca_is_pd(mca->real_type))
 		target = clamp(piano_mca_pd_5v_ma(mca), MCA_ICL_MIN_MA, target);
 
