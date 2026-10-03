@@ -19,7 +19,7 @@
  * voltage 4350 mV, charge current 3000 mA, JEITA window 0-55 degC).  With
  * charge_policy=1 it raises the input current limit by charger type, with
  * charge_current=1 as well the charge current, and with hv_charge=1 it asks
- * PD sources for 9 V; with mipps_auth=1 it relays the Xiaomi charger
+ * PD and PPS sources for 9 V; with mipps_auth=1 it relays the Xiaomi charger
  * authentication (MiPPS) messages for userspace.  piano_mca_write_allowed()
  * lists every property it can write.  With pan_ack=1 it also acknowledges
  * the ADSP's USB-C port notifications.  The battery itself
@@ -56,6 +56,7 @@
 /* Up to seven source PDOs, as decoded by the ADSP */
 #define MCA_PROP_PDOS		0x21011	/* struct piano_mca_pdo[] */
 #define MCA_PROP_PD_FIXED_VOLT	0x21018	/* request a fixed PDO, mV */
+#define MCA_PROP_PPS_SELECT	0x21017	/* request a PPS APDO, see below */
 #define MCA_PROP_VERIFY_PROCESS	0x21002	/* non-zero during adapter auth */
 #define MCA_PD_MAX_PDOS		7
 
@@ -177,7 +178,10 @@ MODULE_PARM_DESC(charge_current,
 /*
  * hv_charge: a PD source with a fixed 9 V PDO is asked for 9 V, as the
  * stock buck strategy does, whatever the battery temperature (that is left
- * to the charge current).  The bus has to settle within the window below in
+ * to the charge current).  A source without one whose PPS APDO covers 9 V
+ * (some power banks list only a 5-11 V APDO) is asked for 9.0 V at its
+ * APDO current, capped at MCA_HV_PPS_MAX_MA; the ADSP keeps the PPS
+ * contract alive by itself.  The bus has to settle within the window below in
  * a few polls and stay there; otherwise the source goes back to 5 V until
  * it is detached.
  */
@@ -195,6 +199,9 @@ MODULE_PARM_DESC(charge_current,
 #define MCA_HV_VBUS_5V_MAX_UV	6000000
 #define MCA_HV_RENEG_MS		10000
 #define MCA_HV_RENEG_MAX	3
+/* Current limit asked of a PPS source */
+#define MCA_HV_PPS_MIN_MA	500
+#define MCA_HV_PPS_MAX_MA	3000
 
 static bool hv_charge;
 module_param(hv_charge, bool, 0444);
@@ -297,6 +304,8 @@ struct piano_mca {
 	enum piano_mca_hv hv;
 	int hv_polls;
 	int hv_renegs;		/* times the source went back to 5 V on its own */
+	bool hv_pps;		/* 9 V is asked of a PPS APDO */
+	u32 hv_pps_ma;		/* its requested current limit */
 	unsigned long hv_retry;	/* jiffies before which 9 V is not asked for */
 	struct pmic_glink_client *pan_client;
 	struct work_struct pan_work;
@@ -529,6 +538,20 @@ static int piano_mca_read(struct piano_mca *mca, u32 prop, void *buf, size_t len
  * Anything else (float voltage, ship mode, boost, ...) is refused, whatever
  * the caller.
  */
+/* PPS request word: voltage in 20 mV and current in 50 mA steps */
+static u32 piano_mca_pps_word(u32 mv, u32 ma)
+{
+	return (mv / 20) << 16 | ma / 50;
+}
+
+static bool piano_mca_pps_word_ok(u32 val)
+{
+	u32 mv = (val >> 16) * 20, ma = (val & 0xffff) * 50;
+
+	return mv == MCA_HV_MV &&
+	       ma >= MCA_HV_PPS_MIN_MA && ma <= MCA_HV_PPS_MAX_MA;
+}
+
 static bool piano_mca_write_allowed(u32 prop, const void *data, size_t len)
 {
 	u32 val = len == sizeof(u32) ? get_unaligned_le32(data) : 0;
@@ -543,6 +566,9 @@ static bool piano_mca_write_allowed(u32 prop, const void *data, size_t len)
 	case MCA_PROP_PD_FIXED_VOLT:
 		return hv_charge && len == sizeof(u32) &&
 		       (val == 5000 || val == MCA_HV_MV);
+	case MCA_PROP_PPS_SELECT:
+		return hv_charge && len == sizeof(u32) &&
+		       piano_mca_pps_word_ok(val);
 	case MCA_PROP_VDM_VERSION:
 	case MCA_PROP_VDM_VOLTAGE:
 	case MCA_PROP_VDM_TEMP:
@@ -738,22 +764,49 @@ static bool piano_mca_is_pd(u32 real_type)
 	       real_type == MCA_TYPE_PD_PPS;
 }
 
-/* Current of the source's fixed 9 V PDO, 0 if it has none */
-static u32 piano_mca_pd_9v_ma(struct piano_mca *mca)
+/*
+ * Current a PD source offers at 9 V, 0 if none: its fixed 9 V PDO when it
+ * has one, as stock prefers, otherwise a PPS APDO whose range covers 9 V
+ * (*pps set), capped at MCA_HV_PPS_MAX_MA.
+ */
+static u32 piano_mca_pd_9v_ma(struct piano_mca *mca, bool *pps)
 {
 	struct piano_mca_pdo pdos[MCA_PD_MAX_PDOS];
+	u32 pps_ma = 0;
 	int i;
 
+	*pps = false;
 	if (piano_mca_read(mca, MCA_PROP_PDOS, pdos, sizeof(pdos)))
 		return 0;
 
 	for (i = 0; i < MCA_PD_MAX_PDOS; i++) {
-		if (le32_to_cpu(pdos[i].min_mv) == MCA_HV_MV &&
-		    le32_to_cpu(pdos[i].max_mv) == MCA_HV_MV)
+		u32 min_mv = le32_to_cpu(pdos[i].min_mv);
+		u32 max_mv = le32_to_cpu(pdos[i].max_mv);
+
+		if (min_mv == MCA_HV_MV && max_mv == MCA_HV_MV)
 			return le32_to_cpu(pdos[i].max_ma);
+		if (min_mv < max_mv && min_mv <= MCA_HV_MV && max_mv >= MCA_HV_MV)
+			pps_ma = max(pps_ma, le32_to_cpu(pdos[i].max_ma));
 	}
 
-	return 0;
+	if (pps_ma < MCA_HV_PPS_MIN_MA)
+		return 0;
+
+	*pps = true;
+	return min_t(u32, pps_ma, MCA_HV_PPS_MAX_MA);
+}
+
+/*
+ * Ask the source for @mv: 9 V through the kind of object it offers it in,
+ * 5 V always as the fixed vSafe5V PDO, as stock does for PPS sources too.
+ */
+static int piano_mca_request_volt(struct piano_mca *mca, u32 mv)
+{
+	if (mv == MCA_HV_MV && mca->hv_pps)
+		return piano_mca_write_u32(mca, MCA_PROP_PPS_SELECT,
+					   piano_mca_pps_word(mv, mca->hv_pps_ma));
+
+	return piano_mca_write_u32(mca, MCA_PROP_PD_FIXED_VOLT, mv);
 }
 
 /*
@@ -764,6 +817,7 @@ static u32 piano_mca_hv_step(struct piano_mca *mca)
 {
 	bool vbus_hv = mca->vbus_uv >= MCA_HV_VBUS_MIN_UV &&
 		       mca->vbus_uv <= MCA_HV_VBUS_MAX_UV;
+	bool pps = false;
 	u32 ma = 0;
 	int ret;
 
@@ -771,7 +825,11 @@ static u32 piano_mca_hv_step(struct piano_mca *mca)
 		return 0;
 
 	if (piano_mca_is_pd(mca->real_type))
-		ma = piano_mca_pd_9v_ma(mca);
+		ma = piano_mca_pd_9v_ma(mca, &pps);
+
+	/* The source must keep offering 9 V the way it was asked for */
+	if (mca->hv != MCA_HV_OFF && pps != mca->hv_pps)
+		ma = 0;
 
 	switch (mca->hv) {
 	case MCA_HV_OFF:
@@ -779,13 +837,16 @@ static u32 piano_mca_hv_step(struct piano_mca *mca)
 		if (!ma || time_before(jiffies, mca->hv_retry) ||
 		    piano_mca_read_u32(mca, MCA_PROP_VERIFY_PROCESS))
 			return 0;
-		ret = piano_mca_write_u32(mca, MCA_PROP_PD_FIXED_VOLT, MCA_HV_MV);
+		mca->hv_pps = pps;
+		mca->hv_pps_ma = ma;
+		ret = piano_mca_request_volt(mca, MCA_HV_MV);
 		if (ret) {
 			dev_warn(mca->dev, "9 V request refused: %d (adsp %d)\n",
 				 ret, mca->retcode);
 			break;
 		}
-		dev_info(mca->dev, "requested 9 V (PDO %u mA)\n", ma);
+		dev_info(mca->dev, "requested 9 V (%s %u mA)\n",
+			 pps ? "PPS" : "PDO", ma);
 		mca->hv = MCA_HV_REQUESTED;
 		mca->hv_polls = 0;
 		return 0;
@@ -816,7 +877,7 @@ static u32 piano_mca_hv_step(struct piano_mca *mca)
 
 	/* Not reached, dropped or refused: 5 V until detach */
 	dev_info(mca->dev, "back to 5 V (bus %d mV)\n", mca->vbus_uv / 1000);
-	piano_mca_write_u32(mca, MCA_PROP_PD_FIXED_VOLT, 5000);
+	piano_mca_request_volt(mca, 5000);
 	mca->hv = MCA_HV_BLOCKED;
 	return 0;
 }
@@ -1284,7 +1345,7 @@ static void piano_mca_stop(void *data)
 	if (!mca->service_up)
 		return;
 	if (mca->online && (mca->hv == MCA_HV_REQUESTED || mca->hv == MCA_HV_ON))
-		piano_mca_write_u32(mca, MCA_PROP_PD_FIXED_VOLT, 5000);
+		piano_mca_request_volt(mca, 5000);
 	if (mca->icl_set_ma)
 		piano_mca_reset_icl(mca);
 	if (mca->fcc_set_ma)
