@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/southchip,sc8541.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Southchip SC8541 switched-capacitor direct charger
+
+maintainers:
+  - bluseliu50 <265648257+bluseliu50@users.noreply.github.com>
+
+description:
+  The SC8541 is a single-cell 2:1 switched-capacitor charger for USB PD
+  PPS sources, with an I2C interface, a 12-bit ADC and input, bus and
+  battery protections.
+
+allOf:
+  - $ref: power-supply.yaml#
+
+properties:
+  compatible:
+    const: southchip,sc8541
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        charger@6a {
+            compatible = "southchip,sc8541";
+            reg = <0x6a>;
+            interrupt-parent = <&tlmm>;
+            interrupts = <68 IRQ_TYPE_EDGE_FALLING>;
+        };
+    };

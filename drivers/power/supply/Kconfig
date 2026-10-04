@@ -849,6 +849,15 @@ config CHARGER_BQ25980
 	  Say Y to enable support for the TI BQ25980, BQ25975 and BQ25960
 	  series of fast battery chargers.
 
+config CHARGER_SC8541
+	tristate "Southchip SC8541 switched-capacitor charger driver"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Say Y to enable support for the Southchip SC8541 single-cell 2:1
+	  switched-capacitor direct charger.  It only exposes the charger;
+	  the USB PD sink driver decides when to use it.
+
 config CHARGER_BQ256XX
 	tristate "TI BQ256XX battery charger driver"
 	depends on I2C
