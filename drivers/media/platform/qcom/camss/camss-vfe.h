@@ -13,6 +13,7 @@
 #include <linux/clk.h>
 #include <linux/spinlock_types.h>
 #include <media/media-entity.h>
+#include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
 
@@ -83,9 +84,29 @@ struct vfe_output {
 	struct completion reg_update;
 };
 
+/*
+ * Colour correction matrix of a PIX line: 3x3 s32 array, row-major, camera
+ * RGB to sRGB, Q10 (1024 = 1.0); all zero (the default) is the identity.
+ * Driver-private control ID.
+ */
+#define V4L2_CID_CAMSS_CCM	(V4L2_CID_USER_BASE | 0x1ff0)
+
+/* Pixel pipeline (ISP) settings of a PIX line */
+struct vfe_isp_params {
+	u32 red_gain;		/* Q10 */
+	u32 blue_gain;		/* Q10 */
+	u32 digital_gain;	/* Q10 */
+	u32 saturation;		/* Q8 */
+	s32 ccm[9];		/* Q10, row-major RGB; all zero: identity */
+	u32 contrast;		/* tone curve S blend, 0..256 */
+	s32 lut_contrast;	/* curve in the gamma LUT, -1: none */
+};
+
 struct vfe_line {
 	enum vfe_line_id id;
 	struct v4l2_subdev subdev;
+	struct v4l2_ctrl_handler ctrls;
+	struct vfe_isp_params isp;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
 	struct v4l2_mbus_framefmt fmt[MSM_VFE_PADS_NUM];
 	struct v4l2_rect compose;
@@ -120,6 +141,8 @@ struct vfe_hw_ops {
 	void (*vfe_buf_done)(struct vfe_device *vfe, int port_id);
 	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
 			      struct vfe_line *line);
+	/* PIX lines with an ISP: apply vfe_line.isp (called locked, streaming) */
+	void (*vfe_isp_update)(struct vfe_device *vfe, struct vfe_line *line);
 };
 
 struct vfe_isr_ops {
@@ -133,6 +156,7 @@ struct vfe_isr_ops {
 
 struct vfe_subdev_resources {
 	bool is_lite;
+	bool reg_update_after_csid_config;
 	u8 line_num;
 	bool has_pd;
 	char *pd_name;
@@ -240,6 +264,7 @@ extern const struct camss_formats vfe_formats_rdi_8x96;
 extern const struct camss_formats vfe_formats_pix_8x96;
 extern const struct camss_formats vfe_formats_rdi_845;
 extern const struct camss_formats vfe_formats_pix_845;
+extern const struct camss_formats vfe_formats_pix_980;
 
 extern const struct vfe_hw_ops vfe_ops_4_1;
 extern const struct vfe_hw_ops vfe_ops_4_7;
@@ -249,6 +274,7 @@ extern const struct vfe_hw_ops vfe_ops_340;
 extern const struct vfe_hw_ops vfe_ops_480;
 extern const struct vfe_hw_ops vfe_ops_680;
 extern const struct vfe_hw_ops vfe_ops_gen3;
+extern const struct vfe_hw_ops vfe_ops_gen4;
 
 int vfe_get(struct vfe_device *vfe);
 void vfe_put(struct vfe_device *vfe);

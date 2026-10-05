@@ -23,6 +23,8 @@
 #define CAMSS_FRAME_MIN_HEIGHT		1
 #define CAMSS_FRAME_MAX_HEIGHT_RDI	8191
 #define CAMSS_FRAME_MAX_HEIGHT_PIX	4096
+/* luma plus chroma lines of a 4:2:2 semi-planar frame */
+#define CAMSS_FRAME_MAX_LINES_PIX	(2 * CAMSS_FRAME_MAX_HEIGHT_PIX)
 
 /* -----------------------------------------------------------------------------
  * Helper functions
@@ -481,7 +483,7 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 						  1, 65528);
 			sizeimage[i] = clamp_t(u32, p->sizeimage,
 					       bytesperline[i],
-					       bytesperline[i] * CAMSS_FRAME_MAX_HEIGHT_PIX);
+					       bytesperline[i] * CAMSS_FRAME_MAX_LINES_PIX);
 		}
 
 	for (j = 0; j < video->nformats; j++)
@@ -528,7 +530,7 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 						  1, 65528);
 			p->sizeimage = clamp_t(u32, p->sizeimage,
 					       p->bytesperline,
-					       p->bytesperline * CAMSS_FRAME_MAX_HEIGHT_PIX);
+					       p->bytesperline * CAMSS_FRAME_MAX_LINES_PIX);
 			lines = p->sizeimage / p->bytesperline;
 
 			if (p->bytesperline < bytesperline[i])

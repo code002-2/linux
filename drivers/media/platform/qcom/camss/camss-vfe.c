@@ -20,6 +20,7 @@
 #include <linux/spinlock.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-subdev.h>
 
 #include "camss-vfe.h"
@@ -283,10 +284,37 @@ const struct camss_formats vfe_formats_pix_845 = {
 	.formats = formats_rdi_845
 };
 
+/*
+ * SM8750 TFE pixel path: Bayer in, demosaiced and colour-converted by the
+ * TFE, NV12 out of the FD (full-resolution YUV) write masters.
+ */
+static const struct camss_format_info formats_pix_980[] = {
+	{ MEDIA_BUS_FMT_SBGGR10_1X10, 10, V4L2_PIX_FMT_SBGGR10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SGBRG10_1X10, 10, V4L2_PIX_FMT_SGBRG10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SGRBG10_1X10, 10, V4L2_PIX_FMT_SGRBG10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SRGGB10_1X10, 10, V4L2_PIX_FMT_SRGGB10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_YUYV8_1_5X8, 8, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+};
+
+const struct camss_formats vfe_formats_pix_980 = {
+	.nformats = ARRAY_SIZE(formats_pix_980),
+	.formats = formats_pix_980
+};
+
 static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 			    unsigned int index, u32 src_req_code)
 {
 	struct vfe_device *vfe = to_vfe(line);
+
+	/* the SM8750 pixel path always produces NV12 */
+	if (vfe->camss->res->version == CAMSS_8750 &&
+	    line->id == VFE_LINE_PIX)
+		return index ? 0 : MEDIA_BUS_FMT_YUYV8_1_5X8;
 
 	switch (vfe->camss->res->version) {
 	case CAMSS_8x16:
@@ -352,7 +380,9 @@ static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 	case CAMSS_845:
 	case CAMSS_8550:
 	case CAMSS_8650:
+	case CAMSS_8750:
 	case CAMSS_8775P:
+	case CAMSS_KAANAPALI:
 	case CAMSS_X1E80100:
 		switch (sink_code) {
 		case MEDIA_BUS_FMT_YUYV8_1X16:
@@ -525,7 +555,8 @@ int vfe_enable_output_v2(struct vfe_line *line)
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
-	ops->reg_update_clear(vfe, line->id);
+	if (ops->reg_update_clear)
+		ops->reg_update_clear(vfe, line->id);
 
 	if (output->state > VFE_OUTPUT_RESERVED) {
 		dev_err(vfe->camss->dev,
@@ -552,7 +583,9 @@ int vfe_enable_output_v2(struct vfe_line *line)
 		output->gen2.active_num++;
 		ops->vfe_wm_update(vfe, output->wm_idx[0],
 				   output->buf[i]->addr[0], line);
-		ops->reg_update(vfe, line->id);
+
+		if (!vfe->res->reg_update_after_csid_config)
+			ops->reg_update(vfe, line->id);
 	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
@@ -969,7 +1002,11 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				u32 tmp;
 				u8 bpp;
 
-				if (j == VFE_LINE_PIX) {
+				if (j == VFE_LINE_PIX &&
+				    vfe->camss->res->version == CAMSS_8750) {
+					/* TFE IPP takes two pixels per clock */
+					tmp = pixel_clock[j] / 2;
+				} else if (j == VFE_LINE_PIX) {
 					tmp = pixel_clock[j];
 				} else {
 					struct vfe_line *l = &vfe->line[j];
@@ -1050,7 +1087,11 @@ static int vfe_check_clock_rates(struct vfe_device *vfe)
 				u32 tmp;
 				u8 bpp;
 
-				if (j == VFE_LINE_PIX) {
+				if (j == VFE_LINE_PIX &&
+				    vfe->camss->res->version == CAMSS_8750) {
+					/* TFE IPP takes two pixels per clock */
+					tmp = pixel_clock[j] / 2;
+				} else if (j == VFE_LINE_PIX) {
 					tmp = pixel_clock[j];
 				} else {
 					struct vfe_line *l = &vfe->line[j];
@@ -1968,6 +2009,8 @@ static int vfe_link_setup(struct media_entity *entity,
 
 static const struct v4l2_subdev_core_ops vfe_core_ops = {
 	.s_power = vfe_set_power,
+	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
+	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
 };
 
 static const struct v4l2_subdev_video_ops vfe_video_ops = {
@@ -1988,6 +2031,115 @@ static const struct v4l2_subdev_ops vfe_v4l2_ops = {
 	.video = &vfe_video_ops,
 	.pad = &vfe_pad_ops,
 };
+
+static int vfe_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct vfe_line *line = container_of(ctrl->handler, struct vfe_line,
+					     ctrls);
+	struct vfe_device *vfe = to_vfe(line);
+	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+
+	switch (ctrl->id) {
+	case V4L2_CID_RED_BALANCE:
+		line->isp.red_gain = ctrl->val;
+		break;
+	case V4L2_CID_BLUE_BALANCE:
+		line->isp.blue_gain = ctrl->val;
+		break;
+	case V4L2_CID_DIGITAL_GAIN:
+		line->isp.digital_gain = ctrl->val;
+		break;
+	case V4L2_CID_SATURATION:
+		line->isp.saturation = ctrl->val;
+		break;
+	case V4L2_CID_CONTRAST:
+		line->isp.contrast = ctrl->val;
+		break;
+	case V4L2_CID_CAMSS_CCM:
+		memcpy(line->isp.ccm, ctrl->p_new.p_s32, sizeof(line->isp.ccm));
+		break;
+	}
+
+	/* otherwise applied when the line starts streaming */
+	if (line->output.state == VFE_OUTPUT_ON) {
+		ops->vfe_isp_update(vfe, line);
+		ops->reg_update(vfe, line->id);
+	}
+
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops vfe_ctrl_ops = {
+	.s_ctrl = vfe_s_ctrl,
+};
+
+/*
+ * ISP line controls: white balance and digital gains, Q10 (1024 = 1.0);
+ * saturation, Q8 (256 = 1.0); contrast, the S curve share of the tone curve
+ * (0 = plain sRGB, 256 = full S curve); colour correction matrix, see
+ * V4L2_CID_CAMSS_CCM.
+ */
+#define VFE_ISP_GAIN_UNITY	1024
+#define VFE_ISP_GAIN_MAX	(16 * VFE_ISP_GAIN_UNITY - 1)
+#define VFE_ISP_SAT_UNITY	256
+#define VFE_ISP_CONTRAST_MAX	256
+
+static const struct v4l2_ctrl_config vfe_ccm_ctrl = {
+	.ops = &vfe_ctrl_ops,
+	.id = V4L2_CID_CAMSS_CCM,
+	.name = "Colour Correction Matrix",
+	.type = V4L2_CTRL_TYPE_INTEGER,
+	.min = -8 * VFE_ISP_GAIN_UNITY,
+	.max = 8 * VFE_ISP_GAIN_UNITY - 1,
+	.step = 1,
+	.def = 0,
+	.dims = { 3, 3 },
+};
+
+static int vfe_init_isp_ctrls(struct vfe_line *line)
+{
+	struct v4l2_ctrl_handler *hdl = &line->ctrls;
+
+	v4l2_ctrl_handler_init(hdl, 6);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_RED_BALANCE,
+			  0, VFE_ISP_GAIN_MAX, 1, VFE_ISP_GAIN_UNITY);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_BLUE_BALANCE,
+			  0, VFE_ISP_GAIN_MAX, 1, VFE_ISP_GAIN_UNITY);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
+			  VFE_ISP_GAIN_UNITY, VFE_ISP_GAIN_MAX, 1,
+			  VFE_ISP_GAIN_UNITY);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_SATURATION,
+			  0, 2 * VFE_ISP_SAT_UNITY, 1, VFE_ISP_SAT_UNITY);
+	v4l2_ctrl_new_std(hdl, &vfe_ctrl_ops, V4L2_CID_CONTRAST,
+			  0, VFE_ISP_CONTRAST_MAX, 1, 0);
+	v4l2_ctrl_new_custom(hdl, &vfe_ccm_ctrl, NULL);
+	if (hdl->error) {
+		int ret = hdl->error;
+
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
+
+	line->isp.red_gain = VFE_ISP_GAIN_UNITY;
+	line->isp.blue_gain = VFE_ISP_GAIN_UNITY;
+	line->isp.digital_gain = VFE_ISP_GAIN_UNITY;
+	line->isp.saturation = VFE_ISP_SAT_UNITY;
+	line->isp.contrast = 0;
+	line->subdev.ctrl_handler = hdl;
+
+	return 0;
+}
+
+static bool vfe_line_has_isp(struct vfe_device *vfe, int i)
+{
+	return i == VFE_LINE_PIX && !vfe->res->is_lite &&
+	       vfe->res->hw_ops->vfe_isp_update;
+}
 
 static const struct v4l2_subdev_internal_ops vfe_v4l2_internal_ops = {
 	.open = vfe_init_formats,
@@ -2012,7 +2164,9 @@ static int vfe_bpl_align_rdi(struct vfe_device *vfe)
 	case CAMSS_845:
 	case CAMSS_8550:
 	case CAMSS_8650:
+	case CAMSS_8750:
 	case CAMSS_8775P:
+	case CAMSS_KAANAPALI:
 	case CAMSS_X1E80100:
 		ret = 16;
 		break;
@@ -2073,6 +2227,15 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		v4l2_subdev_init(sd, &vfe_v4l2_ops);
 		sd->internal_ops = &vfe_v4l2_internal_ops;
 		sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+		if (vfe_line_has_isp(vfe, i)) {
+			ret = vfe_init_isp_ctrls(&vfe->line[i]);
+			if (ret < 0) {
+				dev_err(dev, "Failed to init controls: %d\n",
+					ret);
+				goto error_init;
+			}
+			sd->flags |= V4L2_SUBDEV_FL_HAS_EVENTS;
+		}
 		if (i == VFE_LINE_PIX && vfe->res->is_lite == false)
 			snprintf(sd->name, ARRAY_SIZE(sd->name), "%s%d_%s",
 				 MSM_VFE_NAME, vfe->id, "pix");
@@ -2151,6 +2314,8 @@ error_reg_subdev:
 	media_entity_cleanup(&sd->entity);
 
 error_init:
+	if (sd->ctrl_handler)
+		v4l2_ctrl_handler_free(sd->ctrl_handler);
 	for (i--; i >= 0; i--) {
 		sd = &vfe->line[i].subdev;
 		video_out = &vfe->line[i].video_out;
@@ -2158,6 +2323,7 @@ error_init:
 		msm_video_unregister(video_out);
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
+		v4l2_ctrl_handler_free(sd->ctrl_handler);
 	}
 
 	return ret;
@@ -2181,6 +2347,7 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
 		msm_video_unregister(video_out);
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
+		v4l2_ctrl_handler_free(sd->ctrl_handler);
 	}
 }
 
