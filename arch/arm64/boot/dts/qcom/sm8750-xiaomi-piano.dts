@@ -1328,8 +1328,8 @@
  * existing clock, QUP and RPMh providers are reused, not duplicated.
  * Sensor modes and endpoint numbering are the community implementation.
  */
-/* #include <dt-bindings/clock/qcom,sm8750-cambistmclkcc.h> -- already included above */
-/* #include <dt-bindings/clock/qcom,sm8750-camcc.h> -- already included above */
+#include <dt-bindings/clock/qcom,sm8750-cambistmclkcc.h>
+#include <dt-bindings/clock/qcom,sm8750-camcc.h>
 
 &apps_rsc {
 	regulators-0 {
