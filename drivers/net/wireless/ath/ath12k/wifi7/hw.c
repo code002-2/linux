@@ -714,7 +714,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 		.hw_rev = ATH12K_HW_WCN7860_HW20,
 
 		.fw = {
-			.dir = "WCN7860/hw2.0",
+			.dir = "PEACH/hw2.0",
 			.board_size = 256 * 1024,
 			.cal_offset = 256 * 1024,
 			.m3_loader = ath12k_m3_fw_loader_driver,
